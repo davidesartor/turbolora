@@ -10,6 +10,7 @@ import types
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 import torch
 from datasets import Dataset
 
@@ -25,6 +26,8 @@ class FakeGRPOTrainer:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
         self.state = types.SimpleNamespace(global_step=7)
+        # as transformers.Trainer: user callbacks live on callback_handler, after the built-in ones
+        self.callback_handler = types.SimpleNamespace(callbacks=[object(), *kwargs.get("callbacks", [])])
         Path(self.args.output_dir).mkdir(parents=True, exist_ok=True)  # as transformers.Trainer.__init__ does
         FakeGRPOTrainer.instances.append(self)
 
@@ -108,9 +111,12 @@ def test_resource_logger_adds_vram_and_time(monkeypatch):
     logger = grpo.ResourceLogger()
     logger.on_train_begin(None, None, None)
     logs = {"loss": 0.1}
-    logger.on_log(None, None, None, logs=logs)
+    state = SimpleNamespace(global_step=7, log_history=[{"loss": 0.1, "step": 7}])
+    logger.on_log(None, state, None, logs=logs)
     assert logs["peak_vram_gib"] == 1.0
     assert 0 <= logs["elapsed_hours"] < 1e-3
+    # Trainer copies logs into log_history before on_log; the checkpointed copy must get the keys too
+    assert state.log_history[-1]["peak_vram_gib"] == 1.0
 
 
 def test_save_on_preempt_checkpoints_once_after_signal():
@@ -146,7 +152,9 @@ def test_run_wires_model_adapter_data_and_outputs(stubbed, tmp_path):
     (trainer,) = FakeGRPOTrainer.instances
     assert trainer.train_dataset["prompt"] == [spec.prompt(q) for q in DATASET["question"]]
     assert trainer.reward_funcs == [grpo.reward]
-    assert {type(c) for c in trainer.callbacks} == {grpo.ResourceLogger, grpo.SaveOnPreempt}
+    callbacks = trainer.callback_handler.callbacks
+    assert type(callbacks[0]) is grpo.ResourceLogger  # before WandbCallback so wandb sees its keys
+    assert {type(c) for c in callbacks[1:] if not type(c) is object} == {grpo.SaveOnPreempt}
     assert trainer.resume_from_checkpoint is None
     config = trainer.args
     assert config.output_dir == str(out)

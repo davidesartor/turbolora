@@ -41,8 +41,11 @@ class ResourceLogger(TrainerCallback):
         self.start = time.time()
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        logs["peak_vram_gib"] = torch.cuda.max_memory_allocated() / 2**30
-        logs["elapsed_hours"] = (time.time() - self.start) / 3600
+        extra = dict(peak_vram_gib=torch.cuda.max_memory_allocated() / 2**30, elapsed_hours=(time.time() - self.start) / 3600)
+        logs.update(extra)
+        # Trainer.log copies into log_history before on_log, so stamp the checkpointed copy too
+        if state.log_history and state.log_history[-1].get("step") == state.global_step:
+            state.log_history[-1].update(extra)
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -65,6 +68,8 @@ def argument_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_kwargs) -> None:
     """Load the base, attach `adapter`, train with GRPO/GSPO, export to `<out>/final_adapter`, write run.json."""
     args.out = str(Path(args.out).resolve())
+    outputs_dir = Path("outputs").resolve()
+    run_name = str(Path(args.out).relative_to(outputs_dir)) if Path(args.out).is_relative_to(outputs_dir) else Path(args.out).name
     spec = MODELS[args.model]
 
     max_prompt_length = 512  # 75 of 8521 hard prompts exceed it and are dropped below
@@ -93,7 +98,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
     # paper setup: 64 problems x 4 generations = 256 completions per optimizer step
     config = GRPOConfig(
         output_dir=args.out,
-        run_name=Path(args.out).name,
+        run_name=run_name,
         use_vllm=True,
         learning_rate=args.lr,
         lr_scheduler_type="constant_with_warmup",
@@ -130,8 +135,25 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         reward_funcs=[reward],
         args=config,
         train_dataset=dataset,
-        callbacks=[ResourceLogger(), SaveOnPreempt()],
+        callbacks=[SaveOnPreempt()],
     )
+    # must precede the WandbCallback (which Trainer puts before user callbacks) so wandb sees the extra keys
+    trainer.callback_handler.callbacks.insert(0, ResourceLogger())
+
+    # config half of run.json goes out before training so the dashboard can show the run while it trains
+    summary = dict(
+        model=args.model,
+        task=args.task,
+        adapter=adapter.__name__.lower(),
+        loss=args.loss,
+        rank=rank,
+        **adapter_kwargs,
+        lr=args.lr,
+        seed=args.seed,
+        params=sum(p.numel() for p in model.parameters() if p.requires_grad),
+        gpu=torch.cuda.get_device_name(0),
+    )
+    (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
 
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     start = time.time()
@@ -145,20 +167,10 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
 
     # resource summary the dashboard plots accuracy against
     peak_vram_gb = torch.cuda.max_memory_allocated() / 2**30
-    summary = dict(
-        model=args.model,
-        task=args.task,
-        adapter=adapter.__name__.lower(),
-        loss=args.loss,
-        rank=rank,
-        **adapter_kwargs,
-        lr=args.lr,
-        seed=args.seed,
+    summary |= dict(
         steps=trainer.state.global_step,
-        params=sum(p.numel() for p in model.parameters() if p.requires_grad),
         train_hours=round((time.time() - start) / 3600, 3),
         peak_vram_gb=round(peak_vram_gb, 2),
-        gpu=torch.cuda.get_device_name(0),
     )
     (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
     print(f"peak VRAM: {peak_vram_gb:.1f} GiB of {vram_gb:.0f}, {summary['params']} trainable params")
