@@ -1,26 +1,12 @@
-"""CPU tests on a tiny Qwen2 with Unsloth's get_peft_model stubbed by plain PEFT."""
-
-import sys
-import types
+"""CPU tests on a tiny Qwen2 (unsloth stubbed by conftest.py)."""
 
 import pytest
 import safetensors.torch
 import torch
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import PeftModel
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-
-class FakeFastLanguageModel:
-    @staticmethod
-    def get_peft_model(model, r, lora_alpha, lora_dropout, target_modules, **_):
-        return get_peft_model(
-            model, LoraConfig(r=r, lora_alpha=lora_alpha, target_modules=target_modules)
-        )
-
-
-sys.modules["unsloth"] = types.SimpleNamespace(FastLanguageModel=FakeFastLanguageModel)  # type: ignore[assignment]
-
-from turbolora.adapters import LoRAXS, TinyLoRA, TurboLoRA  # noqa: E402
+from turbolora.adapters import LoRAXS, TinyLoRA, TurboLoRA
 
 CONFIG = Qwen2Config(
     hidden_size=32,
