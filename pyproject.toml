@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Boosting TinyLoRA with Baysian Optimization"
 requires-python = ">=3.12"
 dependencies = [
+    "botorch>=0.18.1",
     "datasets>=4.3.0",
     "einops>=0.8.2",
     "jaxtyping>=0.3.11",
