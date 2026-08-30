@@ -1,0 +1,27 @@
+[project]
+name = "turbolora"
+version = "0.1.0"
+description = "Boosting TinyLoRA with Baysian Optimization"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=4.3.0",
+    "math-verify>=0.9.0",
+    "unsloth>=2026.8.22",
+    "vllm>=0.8",
+    "wandb>=0.29.0",
+]
+
+[tool.uv]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
