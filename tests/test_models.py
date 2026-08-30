@@ -23,3 +23,11 @@ def test_prompt_ends_at_generation_point(name):
 
 def test_boxed_braces_survive_formatting():
     assert "\\boxed{}" in MODELS["qwen2.5-7b"].prompt("Q?")
+
+
+def test_every_qwen_base_size_has_an_instruct_variant():
+    bases = [n for n in MODELS if n.startswith("qwen2.5-") and n.count("-") == 1]
+    assert bases
+    for base in bases:
+        assert f"{base}-instruct" in MODELS
+        assert MODELS[f"{base}-instruct"].hf_id == MODELS[base].hf_id + "-Instruct"

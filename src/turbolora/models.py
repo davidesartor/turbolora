@@ -47,8 +47,12 @@ MODELS: dict[str, Model] = {
     "qwen2.5-14b": Model("Qwen/Qwen2.5-14B", ChatMLBoxedPrompt()),
     "qwen2.5-32b": Model("Qwen/Qwen2.5-32B", ChatMLBoxedPrompt()),
     # QWEN (instruct)
+    "qwen2.5-0.5b-instruct": Model("Qwen/Qwen2.5-0.5B-Instruct", ChatMLBoxedPrompt()),
     "qwen2.5-1.5b-instruct": Model("Qwen/Qwen2.5-1.5B-Instruct", ChatMLBoxedPrompt()),
+    "qwen2.5-3b-instruct": Model("Qwen/Qwen2.5-3B-Instruct", ChatMLBoxedPrompt()),
     "qwen2.5-7b-instruct": Model("Qwen/Qwen2.5-7B-Instruct", ChatMLBoxedPrompt()),
+    "qwen2.5-14b-instruct": Model("Qwen/Qwen2.5-14B-Instruct", ChatMLBoxedPrompt()),
+    "qwen2.5-32b-instruct": Model("Qwen/Qwen2.5-32B-Instruct", ChatMLBoxedPrompt()),
     # QWEN (math)
     "qwen2.5-1.5b-math": Model("Qwen/Qwen2.5-Math-1.5B", ChatMLBoxedPrompt()),
     "qwen2.5-7b-math": Model("Qwen/Qwen2.5-Math-7B", ChatMLBoxedPrompt()),

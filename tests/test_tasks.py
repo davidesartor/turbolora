@@ -100,7 +100,6 @@ def test_extract_strips_units_keeps_percent():
 
 def test_format_answer():
     assert TASKS["gsm8k"].format_answer("... #### 1,050") == "1,050"
-    assert TASKS["math"].format_answer("so \\boxed{\\dfrac{1}{2}}") == "\\frac{1}{2}"
     assert TASKS["aime24"].format_answer("\\boxed{204}") == "204"
     assert TASKS["olympiad"].format_answer(["$\\frac{1}{2 n+2}$"]) == "$\\frac{1}{2 n+2}$"
     assert TASKS["olympiad"].format_answer("['$2^{1009}$']") == "$2^{1009}$"
@@ -112,7 +111,9 @@ def test_reward():
 
 TEST_SIZES = {
     "gsm8k": 1319,
-    "math": 5000,
+    "easy": 500,
+    "medium": 500,
+    "hard": 500,
     "math500": 500,
     "aime24": 30,
     "amc23": 40,
@@ -142,9 +143,20 @@ def test_gold_grades_against_itself(task):
     assert bad == UNGRADEABLE_GOLD.get(task, [])
 
 
-@pytest.mark.parametrize("task", ["gsm8k", "math"])
+TRAIN_SIZES = {"gsm8k": 7473, "easy": 8388, "medium": 8139, "hard": 8521}
+
+
+@pytest.mark.parametrize("task", TRAIN_SIZES)
 def test_train_split_loads(task):
     ds = TASKS[task]("train")
     assert set(ds.column_names) == {"question", "answer"}
-    assert len(ds) > 5000
+    assert len(ds) == TRAIN_SIZES[task]
     assert all(ds["answer"])
+
+
+def test_tiers_are_paper_difficulty_bands():
+    """Easy is GSM8K plus MATH level 1 (rendered chat prompts stripped back to raw questions); hard is levels 3-5."""
+    easy = TASKS["easy"]("train")
+    assert not any(q.startswith("<|im_start|>") for q in easy["question"])
+    assert set(TASKS["gsm8k"]("train")["question"]) < set(easy["question"])
+    assert len(TASKS["hard"]("train")) == 2514 + 2648 + 3361 - 2  # minus the two without gold

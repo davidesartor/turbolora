@@ -4,7 +4,7 @@ import ast
 import re
 from typing import Protocol
 
-from datasets import Dataset, concatenate_datasets, load_dataset
+from datasets import Dataset, load_dataset
 from math_verify import parse, verify
 
 
@@ -44,6 +44,31 @@ class Task(Protocol):
         ...
 
 
+class SimpleRLZoo(Task):
+    """SimpleRL-Zoo difficulty tier (GSM8K + MATH train, split by MATH level); its `test` split is MATH-500."""
+
+    def __init__(self, config: str):
+        self.config = config
+
+    def __call__(self, split: str = "test") -> Dataset:
+        ds = load_dataset(
+            "hkust-nlp/SimpleRL-Zoo-Data",
+            data_files=f"{self.config}/{split}.parquet",
+            split="train",
+        )
+        assert isinstance(ds, Dataset)
+        ds = ds.map(
+            lambda r: {
+                "question": r["extra_info"]["question"],
+                "answer": r["extra_info"]["answer"],
+            }
+        )
+        # two level-5 problems ship without a gold answer; drop them
+        return ds.select_columns(["question", "answer"]).filter(
+            lambda r: bool(r["answer"])
+        )
+
+
 class GSM8K(Task):
     @staticmethod
     def format_answer(answer: str) -> str:
@@ -52,32 +77,6 @@ class GSM8K(Task):
     def __call__(self, split: str = "test") -> Dataset:
         ds = load_from_hf("openai/gsm8k", "main", split)
         return ds.map(lambda r: {"answer": self.format_answer(r["answer"])})
-
-
-class HendrycksMath(Task):
-    subjects = (
-        "algebra",
-        "counting_and_probability",
-        "geometry",
-        "intermediate_algebra",
-        "number_theory",
-        "prealgebra",
-        "precalculus",
-    )
-
-    @staticmethod
-    def format_answer(solution: str) -> str:
-        return extract(solution) or ""
-
-    def __call__(self, split: str = "test") -> Dataset:
-        ds = concatenate_datasets(
-            [load_from_hf("EleutherAI/hendrycks_math", s, split) for s in self.subjects]
-        )
-        ds = ds.rename_columns({"problem": "question", "solution": "answer"})
-        ds = ds.select_columns(["question", "answer"])
-        ds = ds.map(lambda r: {"answer": self.format_answer(r["answer"])})
-        # a couple of train problems have no \boxed{} gold; drop them
-        return ds.filter(lambda r: bool(r["answer"]))
 
 
 class Math500(Task):
@@ -125,8 +124,10 @@ class OlympiadBench(Task):
 
 
 TASKS: dict[str, Task] = {
+    "easy": SimpleRLZoo("simplelr_qwen_gsm8k_level1"),  # GSM8K + MATH level 1
+    "medium": SimpleRLZoo("simplelr_qwen_level1to4"),
+    "hard": SimpleRLZoo("simplelr_qwen_level3to5"),
     "gsm8k": GSM8K(),
-    "math": HendrycksMath(),
     "math500": Math500(),
     "aime24": AIME24(),
     "amc23": AMC23(),
