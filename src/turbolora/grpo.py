@@ -13,11 +13,12 @@ import torch
 from transformers import TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer
+from vllm import SamplingParams
 
 from turbolora.adapters import Adapter
-from turbolora.models import MODELS
+from turbolora.eval import evaluate, summarize
+from turbolora.models import MODELS, Model
 from turbolora.tasks import TASKS, reward
-
 
 
 class SaveOnPreempt(TrainerCallback):
@@ -34,6 +35,45 @@ class SaveOnPreempt(TrainerCallback):
             self.requested = False
 
 
+class FullEval(TrainerCallback):
+    """Greedy full-test-set eval every `eval_steps` steps through the colocated vLLM engine, at the training completion budget."""
+
+    def __init__(
+        self, model, spec: Model, tasks: list[str], eval_steps: int, max_tokens: int
+    ):
+        self.model, self.spec, self.eval_steps = model, spec, eval_steps
+        self.datasets = {task: TASKS[task]("test") for task in tasks}
+        self.sampling = SamplingParams(
+            temperature=0.0, max_tokens=max_tokens, stop=list(spec.prompt.stop)
+        )
+        self.trainer = (
+            None  # set after construction; .log routes metrics to wandb and log_history
+        )
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % self.eval_steps:
+            return
+        # same call the rollout path uses: a LoRARequest built from the live state_dict
+        request = self.model.load_lora("eval_lora", load_tensors=True)
+        generate = lambda prompts: [
+            o.outputs[0].text
+            for o in self.model.fast_generate(
+                prompts, self.sampling, use_tqdm=False, lora_request=request
+            )
+        ]
+        for task, dataset in self.datasets.items():
+            stats = summarize(evaluate(generate, self.spec, dataset))
+            print(
+                f"[step {state.global_step} {task}] accuracy: {stats['accuracy']:.4f} ({stats['n_correct']}/{stats['n']})"
+            )
+            self.trainer.log(
+                {
+                    f"eval_{task}": stats["accuracy"],
+                    f"eval_{task}_unparsed": stats["unparsed"],
+                }
+            )
+
+
 class ResourceLogger(TrainerCallback):
     """Adds peak VRAM and elapsed wall time to every logged step."""
 
@@ -41,7 +81,10 @@ class ResourceLogger(TrainerCallback):
         self.start = time.time()
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        extra = dict(peak_vram_gib=torch.cuda.max_memory_allocated() / 2**30, elapsed_hours=(time.time() - self.start) / 3600)
+        extra = dict(
+            peak_vram_gib=torch.cuda.max_memory_allocated() / 2**30,
+            elapsed_hours=(time.time() - self.start) / 3600,
+        )
         logs.update(extra)
         # Trainer.log copies into log_history before on_log, so stamp the checkpointed copy too
         if state.log_history and state.log_history[-1].get("step") == state.global_step:
@@ -62,14 +105,29 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-steps", type=int, default=-1, help="cap optimizer steps (smoke runs)"
     )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=25,
+        help="full-bench eval through the training engine every N steps (0 = off)",
+    )
+    parser.add_argument(
+        "--eval-tasks", nargs="+", choices=TASKS, default=["gsm8k", "math500"]
+    )
     return parser
 
 
-def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_kwargs) -> None:
+def run(
+    args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_kwargs
+) -> None:
     """Load the base, attach `adapter`, train with GRPO/GSPO, export to `<out>/final_adapter`, write run.json."""
     args.out = str(Path(args.out).resolve())
     outputs_dir = Path("outputs").resolve()
-    run_name = str(Path(args.out).relative_to(outputs_dir)) if Path(args.out).is_relative_to(outputs_dir) else Path(args.out).name
+    run_name = (
+        str(Path(args.out).relative_to(outputs_dir))
+        if Path(args.out).is_relative_to(outputs_dir)
+        else Path(args.out).name
+    )
     spec = MODELS[args.model]
 
     max_prompt_length = 512  # 75 of 8521 hard prompts exceed it and are dropped below
@@ -83,7 +141,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         max_seq_length=max_prompt_length + args.max_completion,
         load_in_4bit=False,
         fast_inference=True,
-        max_lora_rank=max(rank, 8),  # vLLM accepts only {1, 8, 16, ...}; pads smaller adapters
+        max_lora_rank=max(rank, 8),
         gpu_memory_utilization=vllm_share,
     )
     model = adapter.attach(model, rank, args.seed, **adapter_kwargs)
@@ -93,7 +151,9 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         lambda r: {"prompt": spec.prompt(r["question"])}
     )
     # the colocated vLLM path never truncates prompts, and an over-long batch crashes Unsloth's compiled loss
-    dataset = dataset.filter(lambda r: len(tokenizer(r["prompt"]).input_ids) <= max_prompt_length)
+    dataset = dataset.filter(
+        lambda r: len(tokenizer(r["prompt"]).input_ids) <= max_prompt_length
+    )
 
     # paper setup: 64 problems x 4 generations = 256 completions per optimizer step
     config = GRPOConfig(
@@ -129,14 +189,21 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         num_completions_to_print=16,
         wandb_log_unique_prompts=True,
     )
+    callbacks: list[TrainerCallback] = [SaveOnPreempt()]
+    if args.eval_steps:
+        callbacks.append(
+            FullEval(model, spec, args.eval_tasks, args.eval_steps, args.max_completion)
+        )
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
         reward_funcs=[reward],
         args=config,
         train_dataset=dataset,
-        callbacks=[SaveOnPreempt()],
+        callbacks=callbacks,
     )
+    if args.eval_steps:
+        callbacks[-1].trainer = trainer
     # must precede the WandbCallback (which Trainer puts before user callbacks) so wandb sees the extra keys
     trainer.callback_handler.callbacks.insert(0, ResourceLogger())
 
@@ -157,7 +224,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
 
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     start = time.time()
-    os.chdir(args.out)  # Unsloth writes its vLLM LoRA stub (grpo_trainer_lora_model_*) to cwd
+    os.chdir(args.out)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
     adapter_dir = Path(args.out) / "final_adapter"
@@ -173,4 +240,6 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         peak_vram_gb=round(peak_vram_gb, 2),
     )
     (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
-    print(f"peak VRAM: {peak_vram_gb:.1f} GiB of {vram_gb:.0f}, {summary['params']} trainable params")
+    print(
+        f"peak VRAM: {peak_vram_gb:.1f} GiB of {vram_gb:.0f}, {summary['params']} trainable params"
+    )
