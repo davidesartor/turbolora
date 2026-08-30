@@ -2,7 +2,9 @@
 # Seed array for a full GRPO run. Usage: MODEL=qwen2.5-7b TASK=gsm8k ADAPTER=lora [LOSS=gspo] [LR=5e-6] sbatch slurm/train.sh
 #SBATCH -J grpo
 #SBATCH -a 0-2
-#SBATCH -p gpu
+#SBATCH -p gpu-preempt
+#SBATCH --requeue
+#SBATCH --signal=B:USR1@600
 #SBATCH --gpus=1
 #SBATCH --constraint=l40s|a100-40g|a100-80g|h100
 #SBATCH -c 8
@@ -30,7 +32,12 @@ MODEL="${MODEL:?}"
 TASK="${TASK:?}"
 TAG="$MODEL-$TASK"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
+# stable wandb run id so a requeued job resumes the same run
+export WANDB_RESUME=allow
+export WANDB_RUN_ID="${LOSS}-${ADAPTER}-${TAG}-lr${LR}-seed${SEED}"
 
+# preemption sends TERM (900s grace), wall-limit sends USR1: both ask python for a checkpoint
+trap 'kill -USR1 "$pid"' USR1 TERM
 "$HOME/.local/bin/uv" run -m "turbolora.train_${ADAPTER}" \
     --model "$MODEL" \
     --task "$TASK" \
@@ -38,4 +45,10 @@ SEED="${SLURM_ARRAY_TASK_ID:?}"
     --out "outputs/${LOSS}-${ADAPTER}-${TAG}-lr${LR}-seed${SEED}" \
     --lr "$LR" \
     --seed "$SEED" \
-    "$@"
+    "$@" &
+pid=$!
+# `wait` returns early on a trapped signal (128+sig, which `set -e` would treat as fatal);
+# keep waiting until python actually exits, then propagate its real exit code
+status=0
+while kill -0 "$pid" 2>/dev/null; do wait "$pid" && status=0 || status=$?; done
+exit "$status"

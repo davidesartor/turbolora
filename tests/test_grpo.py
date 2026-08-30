@@ -2,7 +2,9 @@
 
 import importlib.machinery
 import json
+import os
 import runpy
+import signal
 import sys
 import types
 from pathlib import Path
@@ -111,6 +113,23 @@ def test_resource_logger_adds_vram_and_time(monkeypatch):
     assert 0 <= logs["elapsed_hours"] < 1e-3
 
 
+def test_save_on_preempt_checkpoints_once_after_signal():
+    callback = grpo.SaveOnPreempt()
+    control = types.SimpleNamespace(should_save=False)
+    callback.on_step_end(None, None, control)
+    assert not control.should_save
+
+    # slurm/train.sh forwards both the wall-limit USR1 and the preemption TERM
+    for sig in (signal.SIGUSR1, signal.SIGTERM):
+        os.kill(os.getpid(), sig)
+        control.should_save = False
+        callback.on_step_end(None, None, control)
+        assert control.should_save
+        control.should_save = False
+        callback.on_step_end(None, None, control)
+        assert not control.should_save
+
+
 def test_run_wires_model_adapter_data_and_outputs(stubbed, tmp_path):
     out = tmp_path / "run"
     grpo.run(parse("--max-steps", "3", out=str(out)), FakeAdapter, rank=2, proj_dim=3)
@@ -127,7 +146,7 @@ def test_run_wires_model_adapter_data_and_outputs(stubbed, tmp_path):
     (trainer,) = FakeGRPOTrainer.instances
     assert trainer.train_dataset["prompt"] == [spec.prompt(q) for q in DATASET["question"]]
     assert trainer.reward_funcs == [grpo.reward]
-    assert any(isinstance(c, grpo.ResourceLogger) for c in trainer.callbacks)
+    assert {type(c) for c in trainer.callbacks} == {grpo.ResourceLogger, grpo.SaveOnPreempt}
     assert trainer.resume_from_checkpoint is None
     config = trainer.args
     assert config.output_dir == str(out)

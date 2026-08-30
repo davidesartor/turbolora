@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -17,6 +18,20 @@ from turbolora.adapters import Adapter
 from turbolora.models import MODELS
 from turbolora.tasks import TASKS, reward
 
+
+
+class SaveOnPreempt(TrainerCallback):
+    """Slurm signals before preemption/wall limit; checkpoint at the next step so the requeue resumes from it."""
+
+    def __init__(self):
+        self.requested = False
+        for sig in (signal.SIGUSR1, signal.SIGTERM):
+            signal.signal(sig, lambda *_: setattr(self, "requested", True))
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.requested:
+            control.should_save = True
+            self.requested = False
 
 
 class ResourceLogger(TrainerCallback):
@@ -115,7 +130,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_k
         reward_funcs=[reward],
         args=config,
         train_dataset=dataset,
-        callbacks=[ResourceLogger()],
+        callbacks=[ResourceLogger(), SaveOnPreempt()],
     )
 
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
