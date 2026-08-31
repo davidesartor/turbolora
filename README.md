@@ -32,14 +32,28 @@ The paper's 13-parameter config is `--rank 2 --proj-dim 13` (u > r² is only mea
 
 ## Training setup (`grpo.py`)
 
-TinyLoRA-paper recipe: 64 problems x 4 rollouts per optimizer step, 3 epochs, no KL, clip 0.2, constant LR (default
-5e-6) with 10 warmup steps, AdamW-8bit, completions capped at 1024 tokens (`--max-completion`). Rollouts come from a
+TinyLoRA-paper recipe: 64 problems x 4 rollouts per optimizer step, 3 epochs, no KL, clip 0.2, constant LR with
+10 warmup steps, AdamW-8bit, completions capped at 1024 tokens (`--max-completion`). Rollouts come from a
 colocated vLLM (~50% of VRAM); the base and adapter are kept in bf16. Prompts longer than 512 tokens are dropped
 (75 of 8,521 on `hard`) because the colocated vLLM path never truncates them. Runs are named
 `outputs/runs/<model>/<task>/<adapter>-<loss>-lr<lr>[-<cfg>]/seed<N>`; `run.json` holds the resolved config and
 `checkpoint-*/` (every 25 steps) the curves the dashboard plots.
 
-Current sweep: Qwen2.5-7B (base) on `hard`, seed 0, LR 5e-6, rank ∈ {1, 2, 8, 32} for `lora`, `loraxs`,
+### Learning rates
+
+`lora` defaults to 5e-6: the optimal LoRA LR is ~10x the full-FT LR of the same task in both SFT and RL
+([LoRA Without Regret](https://thinkingmachines.ai/blog/lora/)), and SimpleRL-Zoo trains full-FT at 5e-7.
+
+The frozen-SVD adapters need far hotter LRs — the LoRA-XS paper fine-tunes R at 4e-3 (math instruction tuning,
+r ≤ 64; 7e-4 at r = 128), 1e-3 (commonsense reasoning) and 6e-4–2e-3 (GLUE), and TinyLoRA re-sweeps LR per update
+size up to 2e-4 because "changes in update size are known to alter effective learning rate". Lacking compute for a per-config sweep, `loraxs`/`tinylora` default to an equal-update-norm rule:
+Adam moves every parameter ~lr per step, so the first-step norm is ‖ΔR‖ ≈ lr·r (LoRA-XS, unit basis) or
+lr·r·√u (TinyLoRA, ‖Pᵢ‖ ≈ r), and the default sets it to 1e-3 for every config — `lr = 1e-3 / (r·√u)`
+(`R_STEP_NORM` in `grpo.py`, `--lr` overrides). The constant is the geometric midpoint of what the fixed-5e-6 pilot
+runs showed: configs at ‖ΔR‖ ≤ 3e-4 per step stayed flat for 200+ steps, and the one at 5e-3 learned fast then
+diverged. Since all these adapters share the same frozen U, Σ, Vᵀ, equal ‖ΔR‖ is equal weight-space speed.
+
+Current sweep: Qwen2.5-7B (base) on `hard`, seed 0, rank ∈ {1, 2, 8, 32} for `lora`, `loraxs`,
 `tinylora` and `tinylora --no-tie` (`CFG=r<rank>[-notie]`).
 
 ## Layout
@@ -95,3 +109,4 @@ Jobs run on `gpu-preempt` with requeue; training checkpoints on SIGTERM/SIGUSR1 
 - TinyLoRA: arXiv 2602.04118
 - LoRA-XS: arXiv 2405.17604
 - SimpleRL-Zoo data tiers and prompts: arXiv 2503.18892
+- LoRA Without Regret (LoRA LR = 10x full-FT): https://thinkingmachines.ai/blog/lora/

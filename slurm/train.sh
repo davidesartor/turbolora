@@ -1,6 +1,6 @@
 #!/bin/bash -l
 # Seed array for a full GRPO run. Usage: MODEL=qwen2.5-7b TASK=easy ADAPTER=lora [LOSS=gspo] [LR=5e-6] [CFG=r1] sbatch slurm/train.sh [--rank 1]
-# CFG names the run dir (<adapter>-<loss>-lr<lr>-<cfg>); single seed: sbatch -a 0 ...
+# CFG names the run dir (<adapter>-<loss>[-lr<lr>]-<cfg>); single seed: sbatch -a 0 ...
 #SBATCH -J grpo
 #SBATCH -a 0-2
 #SBATCH -p gpu-preempt
@@ -26,13 +26,13 @@ export WANDB_PROJECT=turbolora
 export WANDB_DIR="$PWD/outputs"
 grep -qs api.wandb.ai ~/.netrc || export WANDB_MODE=offline
 
-LR="${LR:-5e-6}"
+LR="${LR:-}"
 LOSS="${LOSS:-grpo}"
 ADAPTER="${ADAPTER:?}"
 MODEL="${MODEL:?}"
 TASK="${TASK:?}"
 CFG="${CFG:-}"
-RUN="${ADAPTER}-${LOSS}-lr${LR}${CFG:+-$CFG}"
+RUN="${ADAPTER}-${LOSS}${LR:+-lr$LR}${CFG:+-$CFG}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
 # stable wandb run id so a requeued job resumes the same run
 export WANDB_RESUME=allow
@@ -40,14 +40,18 @@ export WANDB_RUN_ID="${MODEL}-${TASK}-${RUN}-seed${SEED}"
 
 # preemption sends TERM (900s grace), wall-limit sends USR1: both ask python for a checkpoint
 trap 'kill -USR1 "$pid"' USR1 TERM
-"$HOME/.local/bin/uv" run -m "turbolora.train_${ADAPTER}" \
-    --model "$MODEL" \
-    --task "$TASK" \
-    --loss "$LOSS" \
-    --out "outputs/runs/${MODEL}/${TASK}/${RUN}/seed${SEED}" \
-    --lr "$LR" \
-    --seed "$SEED" \
-    "$@" &
+cmd=(
+    "$HOME/.local/bin/uv" run -m "turbolora.train_${ADAPTER}"
+    --model "$MODEL"
+    --task "$TASK"
+    --loss "$LOSS"
+    --out "outputs/runs/${MODEL}/${TASK}/${RUN}/seed${SEED}"
+    --seed "$SEED"
+)
+if [ -n "$LR" ]; then
+    cmd+=(--lr "$LR")
+fi
+"${cmd[@]}" "$@" &
 pid=$!
 # `wait` returns early on a trapped signal (128+sig, which `set -e` would treat as fatal);
 # keep waiting until python actually exits, then propagate its real exit code

@@ -20,6 +20,9 @@ from turbolora.eval import evaluate, summarize
 from turbolora.models import MODELS, Model
 from turbolora.tasks import TASKS, reward
 
+# target per-step ‖ΔR‖_F: Adam moves each param ~lr/step, so lr = R_STEP_NORM / (r·√u)
+R_STEP_NORM = 1e-3
+
 
 class SaveOnPreempt(TrainerCallback):
     """Slurm signals before preemption/wall limit; checkpoint at the next step so the requeue resumes from it."""
@@ -98,7 +101,9 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", choices=TASKS, required=True)
     parser.add_argument("--out", required=True, help="output dir (unique per run)")
     parser.add_argument("--loss", choices=["grpo", "gspo"], default="grpo")
-    parser.add_argument("--lr", type=float, default=5e-6)
+    parser.add_argument(
+        "--lr", type=float, default=None, help="override the per-adapter default"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max-completion", type=int, default=1024)

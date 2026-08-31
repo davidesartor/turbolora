@@ -6,4 +6,5 @@ from turbolora.adapters import LoRA
 parser = grpo.argument_parser()
 parser.add_argument("--rank", type=int, default=32)
 args = parser.parse_args()
+args.lr = args.lr or 5e-6
 grpo.run(args, LoRA, rank=args.rank)

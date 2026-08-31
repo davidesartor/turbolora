@@ -308,7 +308,7 @@ function renderTable(series) {
   for (const [, r] of runs) trainedOn.set(r.model, (trainedOn.get(r.model) ?? new Set()).add(r.task));
   const leafOf = (id, r) => {
     const segs = id.split("/"), cfg = segs.length > 2 ? segs[segs.length - 2] : "";
-    const toks = cfg.split(/-(?=[a-z])/).filter((t) => t && t !== r.adapter && t !== r.loss);
+    const toks = cfg.split(/-(?=[a-z])/).filter((t) => t && t !== r.adapter && t !== r.loss && !/^lr(?:[\d.]+(?:e[+-]?\d+)?)?$/.test(t));
     const i = toks.findIndex((t) => /^r\d+$/.test(t)); if (i > 0) toks.unshift(...toks.splice(i, 1));
     const task = state.train === "all" && (trainedOn.get(r.model)?.size ?? 0) > 1 ? r.task : "";
     return [task, ...toks, r.seed != null ? `seed${r.seed}` : segs[segs.length - 1]].filter(Boolean).join("_");
@@ -427,7 +427,7 @@ function spark(name, pts, epochs = [], ref = null) {
 }
 function renderRun(id) {
   const r = DATA.runs[id], tab = currentTab();
-  const meta = [["model", modelLabel(r.model)], ["task", label(r.task)], ["adapter", ADAPTER[r.adapter] ?? r.adapter], ["loss", r.loss], ["rank", r.rank], ["u", r.proj_dim], ["tie", r.tie], ["lr", r.lr], ["seed", r.seed], ["steps", r.status === "running" ? `${r.step ?? 0}${r.max_steps ? ` / ${r.max_steps}` : ""}` : r.steps], ["eta", r.status !== "running" ? null : eta(r) ? `${eta(r)} (${clock(r.eta_time)})` : r.idle_hours ? `queued, idle ${dur(r.idle_hours)}` : null],
+  const meta = [["model", modelLabel(r.model)], ["task", label(r.task)], ["adapter", ADAPTER[r.adapter] ?? r.adapter], ["loss", r.loss], ["rank", r.rank], ["u", r.proj_dim], ["tie", r.tie], ["seed", r.seed], ["steps", r.status === "running" ? `${r.step ?? 0}${r.max_steps ? ` / ${r.max_steps}` : ""}` : r.steps], ["eta", r.status !== "running" ? null : eta(r) ? `${eta(r)} (${clock(r.eta_time)})` : r.idle_hours ? `queued, idle ${dur(r.idle_hours)}` : null],
     ["params", r.params != null ? XAXIS.params.fmt(r.params) : null], ["time", r.train_hours != null ? XAXIS.time.fmt(r.train_hours) : null], ["VRAM", r.peak_vram_gb != null ? XAXIS.vram.fmt(r.peak_vram_gb) : null], ["gpu", r.gpu]]
     .filter(([, v]) => v != null).map(([k, v]) => `<span class="chip"><span>${esc(k)}</span><span class="mono" style="color:inherit;margin:0">${esc(v)}</span></span>`).join("");
   const curves = (r.curves ?? []);
