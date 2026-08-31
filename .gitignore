@@ -6,3 +6,4 @@ outputs/
 .old/
 .hf-cache
 .unsloth-cache/
+dashboard/dashboard.html

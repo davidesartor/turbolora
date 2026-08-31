@@ -55,7 +55,8 @@ src/turbolora/
   train_turbolora.py BO entry point: objective = vLLM pass rate on a random train subset
   eval.py            greedy vLLM eval of a base model or a trained adapter
 slurm/               baseline.sh, train.sh, bo.sh, eval.sh
-dashboard/           uv run dashboard/build.py -> dashboard/dashboard.html (baselines, runs, curves)
+dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
+                     uv run dashboard/build.py -> standalone dashboard.html snapshot to share
 tests/
 collaborators-poc/   original proof-of-concept BO pipeline (kept for reference)
 ```
