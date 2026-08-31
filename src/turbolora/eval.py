@@ -1,4 +1,4 @@
-"""Greedy (pass@1) test-set eval of a bare model on one or more tasks with vLLM."""
+"""Greedy (pass@1) test-set eval of a model, optionally with a trained adapter, on one or more tasks with vLLM."""
 
 import argparse
 import json
@@ -42,6 +42,23 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
+def resolve_run(model: str | None, adapter: str | None, out_dir: str | None) -> tuple[str, Path]:
+    """Adapter evals live next to their run.json (model read from it); baselines go under out-dir/<model>."""
+    if adapter:
+        run_dir = Path(adapter).parent
+        model = model or json.loads((run_dir / "run.json").read_text())["model"]
+        return model, Path(out_dir) if out_dir else run_dir / "eval"
+    if not model:
+        raise SystemExit("--model is required without --adapter")
+    return model, Path(out_dir or "outputs/baselines") / model
+
+
+def lora_engine_args(adapter: str) -> dict:
+    """vLLM's LoRA kernels need max_lora_rank >= 8 even for a rank-2 adapter."""
+    rank = json.loads((Path(adapter) / "adapter_config.json").read_text())["r"]
+    return dict(enable_lora=True, max_lora_rank=max(8, rank))
+
+
 def usage(seconds: float) -> dict:
     """Wall time, host RAM peak, and the GPU's name / VRAM as reported by nvidia-smi."""
     query = "--query-gpu=name,memory.used,memory.total"
@@ -69,20 +86,23 @@ def usage(seconds: float) -> dict:
 
 if __name__ == "__main__":
     from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=MODELS, required=True)
+    parser.add_argument("--model", choices=MODELS, help="defaults to the adapter's run.json")
+    parser.add_argument("--adapter", help="PEFT adapter dir (<run>/final_adapter); results go to <run>/eval/")
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--tp", type=int, default=1, help="tensor parallel size (GPUs)")
     parser.add_argument(
-        "--out-dir", default="outputs/eval", help="writes <out-dir>/<model>/<task>.json"
+        "--out-dir", help="baselines: <out-dir>/<model>/<task>.json (default outputs/baselines)"
     )
     parser.add_argument(
         "--show", type=int, default=0, help="print first N completions per task"
     )
     args = parser.parse_args()
 
+    args.model, out_dir = resolve_run(args.model, args.adapter, args.out_dir)
     spec = MODELS[args.model]
     config = json.loads(Path(hf_hub_download(spec.hf_id, "config.json")).read_text())
     text_config = config.get("text_config", config)
@@ -96,12 +116,16 @@ if __name__ == "__main__":
         {"limit_mm_per_prompt": {"image": 0}} if "vision_config" in config else {}
     )
 
+    lora = lora_engine_args(args.adapter) if args.adapter else {}
+    lora_request = LoRARequest("adapter", 1, str(Path(args.adapter).resolve())) if args.adapter else None
+
     llm = LLM(
         model=spec.hf_id,
         max_model_len=max_model_len,
         gpu_memory_utilization=0.9,
         tensor_parallel_size=args.tp,
         **multimodal,
+        **lora,
     )
     sampling = SamplingParams(
         temperature=0.0,
@@ -109,7 +133,7 @@ if __name__ == "__main__":
         stop=list(spec.prompt.stop),
     )
     generate = lambda prompts: [
-        o.outputs[0].text for o in llm.generate(prompts, sampling)
+        o.outputs[0].text for o in llm.generate(prompts, sampling, lora_request=lora_request)
     ]
 
     for task in args.tasks:
@@ -128,11 +152,11 @@ if __name__ == "__main__":
             f"{stats['seconds']}s, {stats['vram_used_gb']}/{stats['vram_total_gb']} GB on {stats['gpu']}"
         )
 
-        out_path = Path(args.out_dir) / args.model / f"{task}.json"
+        out_path = out_dir / f"{task}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
             json.dumps(
-                {"model": spec.hf_id, "task": task, **stats, "records": records},
+                {"model": spec.hf_id, "adapter": args.adapter, "task": task, **stats, "records": records},
                 indent=2,
             )
         )
