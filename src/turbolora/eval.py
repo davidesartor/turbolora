@@ -53,10 +53,12 @@ def resolve_run(model: str | None, adapter: str | None, out_dir: str | None) -> 
     return model, Path(out_dir or "outputs/baselines") / model
 
 
-def lora_engine_args(adapter: str) -> dict:
+def lora_engine_args(adapters: list[str]) -> dict:
     """vLLM's LoRA kernels need max_lora_rank >= 8 even for a rank-2 adapter."""
-    rank = json.loads((Path(adapter) / "adapter_config.json").read_text())["r"]
-    return dict(enable_lora=True, max_lora_rank=max(8, rank))
+    ranks = [
+        json.loads((Path(a) / "adapter_config.json").read_text())["r"] for a in adapters
+    ]
+    return dict(enable_lora=True, max_lora_rank=max(8, *ranks))
 
 
 def usage(seconds: float) -> dict:
@@ -90,7 +92,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=MODELS, help="defaults to the adapter's run.json")
-    parser.add_argument("--adapter", help="PEFT adapter dir (<run>/final_adapter); results go to <run>/eval/")
+    parser.add_argument(
+        "--adapters",
+        nargs="+",
+        help="PEFT adapter dirs (<run>/final_adapter); each one's results go to its own <run>/eval/",
+    )
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--tp", type=int, default=1, help="tensor parallel size (GPUs)")
@@ -100,9 +106,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--show", type=int, default=0, help="print first N completions per task"
     )
+    parser.add_argument(
+        "--skip-existing", action="store_true", help="leave already-written <task>.json alone"
+    )
     args = parser.parse_args()
 
-    args.model, out_dir = resolve_run(args.model, args.adapter, args.out_dir)
+    # one engine load serves every adapter, so they must all sit on the same base model
+    adapters = args.adapters or [None]
+    runs = [resolve_run(args.model, adapter, args.out_dir) for adapter in adapters]
+    models = {model for model, _ in runs}
+    if len(models) > 1:
+        raise SystemExit(f"adapters span several base models: {sorted(models)}")
+    args.model = models.pop()
     spec = MODELS[args.model]
     config = json.loads(Path(hf_hub_download(spec.hf_id, "config.json")).read_text())
     text_config = config.get("text_config", config)
@@ -116,8 +131,7 @@ if __name__ == "__main__":
         {"limit_mm_per_prompt": {"image": 0}} if "vision_config" in config else {}
     )
 
-    lora = lora_engine_args(args.adapter) if args.adapter else {}
-    lora_request = LoRARequest("adapter", 1, str(Path(args.adapter).resolve())) if args.adapter else None
+    lora = lora_engine_args(args.adapters) if args.adapters else {}
 
     llm = LLM(
         model=spec.hf_id,
@@ -132,35 +146,48 @@ if __name__ == "__main__":
         max_tokens=max_tokens,
         stop=list(spec.prompt.stop),
     )
-    generate = lambda prompts: [
-        o.outputs[0].text for o in llm.generate(prompts, sampling, lora_request=lora_request)
-    ]
+    datasets = {task: TASKS[task]("test") for task in args.tasks}
 
-    for task in args.tasks:
-        start = time.perf_counter()
-        records = evaluate(generate, spec, TASKS[task]("test"))
-        stats = summarize(records) | usage(time.perf_counter() - start)
-
-        for record in records[: args.show]:
-            print("=" * 80)
-            print(f"question:  {record['question']}")
-            print(f"completion:\n{record['completion']}")
-            print(f"predicted: {record['predicted']}   answer: {record['answer']}")
-        print(
-            f"[{args.model}/{task}] accuracy: {stats['accuracy']:.4f} "
-            f"({stats['n_correct']}/{stats['n']}), unparsed: {stats['unparsed']}, "
-            f"{stats['seconds']}s, {stats['vram_used_gb']}/{stats['vram_total_gb']} GB on {stats['gpu']}"
+    for index, (adapter, (_, out_dir)) in enumerate(zip(adapters, runs)):
+        lora_request = (
+            LoRARequest(f"adapter{index}", index + 1, str(Path(adapter).resolve()))
+            if adapter
+            else None
         )
+        generate = lambda prompts: [
+            o.outputs[0].text
+            for o in llm.generate(prompts, sampling, lora_request=lora_request)
+        ]
 
-        out_path = out_dir / f"{task}.json"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(
-            json.dumps(
-                {"model": spec.hf_id, "adapter": args.adapter, "task": task, **stats, "records": records},
-                indent=2,
+        for task in args.tasks:
+            out_path = out_dir / f"{task}.json"
+            if args.skip_existing and out_path.exists():
+                print(f"skipping {out_path}")
+                continue
+
+            start = time.perf_counter()
+            records = evaluate(generate, spec, datasets[task])
+            stats = summarize(records) | usage(time.perf_counter() - start)
+
+            for record in records[: args.show]:
+                print("=" * 80)
+                print(f"question:  {record['question']}")
+                print(f"completion:\n{record['completion']}")
+                print(f"predicted: {record['predicted']}   answer: {record['answer']}")
+            print(
+                f"[{args.model}/{task}] accuracy: {stats['accuracy']:.4f} "
+                f"({stats['n_correct']}/{stats['n']}), unparsed: {stats['unparsed']}, "
+                f"{stats['seconds']}s, {stats['vram_used_gb']}/{stats['vram_total_gb']} GB on {stats['gpu']}"
             )
-        )
-        print(f"wrote {out_path}")
+
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(
+                    {"model": spec.hf_id, "adapter": adapter, "task": task, **stats, "records": records},
+                    indent=2,
+                )
+            )
+            print(f"wrote {out_path}")
 
     # vLLM's engine teardown can hang the interpreter at exit; skip it
     sys.stdout.flush()
