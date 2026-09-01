@@ -109,6 +109,12 @@ for model, rows in PAPER_TABLE.items():
                 )
 
 
+# metrics no card renders: the min/max envelopes, the raw reward mirrors and the duplicate length series
+CURVE_DROP = re.compile(
+    r"^(completion_length|completions/(min|max)_|clip_ratio/(high|low)_|rewards/)"
+)
+
+
 def load_task(path: Path) -> dict:
     """Stats for one eval JSON plus wrong-or-unparsed examples (questions truncated, completions dropped)."""
     data = json.loads(path.read_text())
@@ -131,12 +137,25 @@ def load_curves(run_dir: Path) -> list[dict]:
     history = json.loads(checkpoints[-1].read_text())["log_history"]
     return [
         {
-            k: (round(v, 6) if isinstance(v, float) else v)
+            k: (float(f"{v:.4g}") if isinstance(v, float) else v)
             for k, v in row.items()
-            if isinstance(v, (int, float))
+            if isinstance(v, (int, float)) and not CURVE_DROP.match(k)
         }
         for row in history
         if "loss" in row or any(k.startswith("eval_") for k in row)
+    ]
+
+
+def thin(curves: list[dict], every: int) -> list[dict]:
+    """Keep every Nth step plus the endpoints and every mid-train eval, which land off the grid."""
+    if every <= 1:
+        return curves
+    return [
+        row
+        for i, row in enumerate(curves)
+        if row.get("step", 0) % every == 0
+        or i in (0, len(curves) - 1)
+        or any(k.startswith("eval_") for k in row)
     ]
 
 
@@ -216,7 +235,7 @@ def load_progress(run_dir: Path, curves: list[dict]) -> dict:
     return progress
 
 
-def collect(baselines_dir: Path, runs_dir: Path) -> dict:
+def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
     for path in sorted(baselines_dir.glob("*/*.json")):
@@ -245,16 +264,26 @@ def collect(baselines_dir: Path, runs_dir: Path) -> dict:
             for p in sorted(run_dir.glob("eval/*.json"))
             if p.stem in EVAL_TASKS
         }
-        curves = load_curves(run_dir)
+        curves = thin(load_curves(run_dir), curve_every)
         runs[str(rel)] = (
             summary | load_progress(run_dir, curves) | dict(tasks=tasks, curves=curves)
         )
 
     # keep MODELS' declaration order so families stay grouped
     ordered = {name: models[name] for name in MODELS if name in models}
+
+    # the same benchmark question is missed by hundreds of runs: store each once and index into the pool
+    questions: dict[str, int] = {}
+    for stats in [t for r in runs.values() for t in r["tasks"].values()] + [
+        t for m in ordered.values() for t in m["tasks"].values()
+    ]:
+        for miss in stats["misses"]:
+            miss["q"] = questions.setdefault(miss.pop("question"), len(questions))
+
     return dict(
         models=ordered,
         runs=runs,
+        questions=list(questions),
         tasks=EVAL_TASKS,
         paper=PAPER,
         paper_curves={

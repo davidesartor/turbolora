@@ -7,3 +7,4 @@ outputs/
 .hf-cache
 .unsloth-cache/
 dashboard/dashboard.html
+dashboard/dashboard-slim.html

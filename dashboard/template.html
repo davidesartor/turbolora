@@ -68,8 +68,7 @@ svg .axis .title { fill: var(--muted); font-family: "IBM Plex Sans", sans-serif;
 svg .base { stroke-dasharray: 4 4; stroke-width: 1.2; opacity: 0.8; }
 svg .base-label { font-size: 10px; }
 svg .curve { fill: none; stroke-width: 1.8; }
-svg .curve.pending { stroke-dasharray: 2 3; stroke-width: 1.2; opacity: 0.7; }
-svg .pt.pending { stroke-width: 1.5; }
+svg .band { stroke: none; opacity: 0.13; }
 svg .pt { cursor: pointer; stroke: var(--surface); stroke-width: 1.5; }
 svg .pt:hover, svg .pt:focus { stroke: var(--ink); stroke-width: 2; outline: none; }
 svg .note { fill: var(--muted); font-family: "IBM Plex Sans", sans-serif; font-size: 13px; }
@@ -163,6 +162,7 @@ const PALETTE = ["#1f6e8c", "#c2542d", "#2f7a4f", "#7b4ea3", "#b58a12", "#c23d7a
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pct = (x) => (100 * x).toFixed(1);
+const median = (xs) => { const v = [...xs].sort((a, b) => a - b), m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
 const signed = (x) => `${x >= 0 ? "+" : ""}${x.toFixed(1)}`;
 const label = (t) => TASK_LABEL[t] ?? t;
 const FAMILY = { qwen: "Qwen", deepseek: "DeepSeek", ministral: "Ministral", llama: "Llama", mistral: "Mistral" };
@@ -209,17 +209,12 @@ function seriesFor(view, tab) {
   const build = (name, model, task, c, extra = {}) => {
     const base = DATA.models[model]?.tasks[task];
     const pool = runs.filter(([, r]) => r.model === model && r.tasks[task] && r[x.key] != null && trainOk(r));
-    // runs with no eval JSON yet fall back to the last in-training eval_<task> logged in their curves
-    const partial = runs.filter(([, r]) => r.model === model && !r.tasks[task] && r[x.key] != null && trainOk(r))
-      .map(([id, r]) => { const row = [...(r.curves ?? [])].reverse().find((q) => q[`eval_${task}`] != null); return row && { id, run: r, x: r[x.key], y: row[`eval_${task}`], step: row.step, model, task, partial: true }; })
-      .filter(Boolean);
-    const sets = state.train === "all" ? [...new Set([...pool.map(([, r]) => r.task), ...partial.map((p) => p.run.task)])] : [state.train];
+    const sets = state.train === "all" ? [...new Set(pool.map(([, r]) => r.task))] : [state.train];
     const split = sets.length > 1;
     // one series per training set when several are shown; the first carries the baseline label and unevaluated rows
     return (split ? sets : [null]).map((t, j) => ({
       name: t ? `${name} ← ${label(t)}` : name, model, task, train: t, primary: j === 0, color: shade(c, j, sets.length),
       base: base?.accuracy ?? null, baseStats: base,
-      partial: partial.filter((p) => !t || p.run.task === t).sort((a, b) => a.x - b.x),
       points: pool.filter(([, r]) => !t || r.task === t).map(([id, r]) => ({ id, run: r, x: r[x.key], y: r.tasks[task].accuracy, model, task })).sort((a, b) => a.x - b.x),
       ...extra,
     }));
@@ -256,13 +251,13 @@ function renderChart(series) {
   const x = XAXIS[state.x];
   const shown = series.filter((s) => !state.hidden.has(s.name));
   const pts = shown.flatMap((s) => s.points);
-  const xs = shown.flatMap((s) => [...s.points, ...s.partial]).map((p) => p.x).filter((v) => v > 0 || !x.log);
+  const xs = shown.flatMap((s) => s.points).map((p) => p.x).filter((v) => v > 0 || !x.log);
   const lo = x.log ? 1 : 0;
   let hi = xs.length ? Math.max(...xs) : (x.log ? 1e7 : 10);
   hi = x.log ? 10 ** Math.max(1, Math.ceil(Math.log10(hi))) : hi > 0 ? hi * 1.1 : 10;
   const sx = (v) => M.l + (x.log ? (Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) : (v - lo) / (hi - lo)) * (W - M.l - M.r);
-  // y range fits what is shown: baselines plus evaluated and in-training run points, padded and snapped to a tick step
-  const ys = shown.flatMap((s) => [s.base, ...s.points.map((p) => p.y), ...s.partial.map((p) => p.y)]).filter((v) => v != null);
+  // y range fits what is shown: baselines plus evaluated run points, padded and snapped to a tick step
+  const ys = shown.flatMap((s) => [s.base, ...s.points.map((p) => p.y)]).filter((v) => v != null);
   let ylo = ys.length ? Math.min(...ys) : 0, yhi = ys.length ? Math.max(...ys) : 1;
   const span = Math.max(yhi - ylo, 0.05), ystep = [0.01, 0.02, 0.05, 0.1, 0.2].find((st) => span / st <= 8) ?? 0.2;
   ylo = Math.max(0, Math.floor((ylo - 0.1 * span) / ystep) * ystep); yhi = Math.min(1, Math.ceil((yhi + 0.1 * span) / ystep) * ystep);
@@ -279,14 +274,23 @@ function renderChart(series) {
 
   // baselines: dashed across the full width, labelled in the right margin
   for (const s of shown) if (s.base != null && (s.primary || !shown.some((o) => o !== s && o.model === s.model && o.task === s.task))) g += `<line class="base" style="stroke:${s.color}" x1="${M.l}" x2="${W - M.r}" y1="${sy(s.base)}" y2="${sy(s.base)}"/><text class="base-label" style="fill:${s.color}" x="${W - M.r + 6}" y="${sy(s.base) + 3}">${pct(s.base)} ${esc(s.train ? s.name.split(" ← ")[0] : s.name)}</text>`;
-  for (const s of shown) {
-    // dotted through every point (in-training ones included), solid through the finished evals only
-    const all = [...s.points, ...s.partial].sort((a, b) => a.x - b.x);
-    if (all.length > 1) g += `<polyline class="curve pending" style="stroke:${s.color}" points="${all.map((p) => `${sx(p.x)},${sy(p.y)}`).join(" ")}"/>`;
-    if (s.points.length > 1) g += `<polyline class="curve" style="stroke:${s.color}" points="${s.points.map((p) => `${sx(p.x)},${sy(p.y)}`).join(" ")}"/>`;
-    g += all.map((p) => `${mark(p.run?.adapter, sx(p.x), sy(p.y))} class="pt${p.partial ? " pending" : ""}" tabindex="0" style="fill:${p.partial ? "var(--surface)" : s.color};stroke:${p.partial ? s.color : "var(--surface)"}" data-run="${esc(p.id)}" data-task="${p.task}" data-series="${esc(s.name)}" data-y="${p.y}"${p.step != null ? ` data-step="${p.step}"` : ""}/>`).join("");
+  // the families are separate sweeps, so one band and line per adapter; configs and seeds stack up at the same x and collapse to a median and a min-max spread
+  const sweeps = shown.map((s) => [s, [...new Set(s.points.map((p) => p.run?.adapter))].map((a) => {
+    const at = new Map();
+    for (const p of s.points) if (p.run?.adapter === a) (at.get(p.x) ?? at.set(p.x, []).get(p.x)).push(p.y);
+    return [...at].sort((u, v) => u[0] - v[0]).map(([x, ys]) => ({ x, med: median(ys), lo: Math.min(...ys), hi: Math.max(...ys) }));
+  })]);
+  // bands first so no series' spread hides another's runs
+  for (const [s, adapters] of sweeps) for (const band of adapters) {
+    if (band.length < 2 || band.every((b) => b.lo === b.hi)) continue;
+    const edge = [...band.map((b) => `${sx(b.x)},${sy(b.hi)}`), ...band.slice().reverse().map((b) => `${sx(b.x)},${sy(b.lo)}`)];
+    g += `<polygon class="band" style="fill:${s.color}" points="${edge.join(" ")}"/>`;
   }
-  if (!pts.length && !shown.some((s) => s.partial.length)) g += `<text class="note" x="${(M.l + W - M.r) / 2}" y="${(M.t + H - M.b) / 2}" text-anchor="middle">${runs.length ? "No evaluated runs for this selection yet" : "No training runs yet — baselines only"}</text>`;
+  for (const [s, adapters] of sweeps) {
+    for (const line of adapters) if (line.length > 1) g += `<polyline class="curve" style="stroke:${s.color}" points="${line.map((b) => `${sx(b.x)},${sy(b.med)}`).join(" ")}"/>`;
+    g += s.points.map((p) => `${mark(p.run?.adapter, sx(p.x), sy(p.y))} class="pt" tabindex="0" style="fill:${s.color};stroke:var(--surface)" data-run="${esc(p.id)}" data-task="${p.task}" data-series="${esc(s.name)}" data-y="${p.y}"/>`).join("");
+  }
+  if (!pts.length) g += `<text class="note" x="${(M.l + W - M.r) / 2}" y="${(M.t + H - M.b) / 2}" text-anchor="middle">${runs.length ? "No evaluated runs for this selection yet" : "No training runs yet — baselines only"}</text>`;
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="accuracy versus ${x.title}">${g}</svg><div class="tip" id="tip" hidden></div>`;
 }
 
@@ -302,7 +306,8 @@ function renderTable(series) {
   const res = (r) => `<td class="mono">${r.params != null ? XAXIS.params.fmt(r.params) : "–"}</td><td class="mono">${r.train_hours != null ? XAXIS.time.fmt(r.train_hours) : "–"}</td><td class="mono">${r.peak_vram_gb != null ? XAXIS.vram.fmt(r.peak_vram_gb) : "–"}</td>`;
   const pad = (d) => ` style="padding-left:${12 + 18 * d}px"`;
   // "qwen2.5-7b-instruct" -> ["qwen2.5", "7b-instruct"]
-  const famId = (model) => { const m = /^([a-z]+[\d.]*)-(.+)$/.exec(model); return m ? [m[1], m[2]] : [model]; };
+  // top level mirrors the legend's families, so the variant only shows in the id when the family doesn't carry it
+  const famId = (model) => { const f = familyOf(model), v = variantOf(model), rest = model.replace(/^[a-z]+[\d.]*-/, ""); return [familyLabel(f), (f.endsWith(`-${v}`) ? rest.replace(`-${v}`, "") : rest) || model]; };
   // leaf keeps what the tree levels above don't: rank/lr/extras/seed, plus the train set when a model mixes several
   const trainedOn = new Map();
   for (const [, r] of runs) trainedOn.set(r.model, (trainedOn.get(r.model) ?? new Set()).add(r.task));
@@ -397,7 +402,6 @@ const CURVE_GROUPS = [
   ]],
 ];
 // duplicates and min/max variants of keys already charted; keep them out of "Other"
-const CURVE_IGNORE = /^(completion_length|completions\/(min|max)_|clip_ratio\/(high|low)_|rewards\/)/;
 const clock = (t) => new Date(1000 * t).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 const dur = (h) => h < 1 ? `${Math.max(1, Math.round(60 * h))} min` : h < 48 ? `${h.toFixed(1)} h` : `${(h / 24).toFixed(1)} d`;
 const agoFmt = (s) => { s = Math.max(0, Math.round(s)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s ago` : `${dur(s / 3600)} ago`; };
@@ -442,7 +446,7 @@ function renderRun(id) {
     return cell(k, label(t), `${pct(last[k])}${un ? ` <span style="color:var(--warn)">${un} unparsed</span>` : ""}`, DATA.models[r.model]?.tasks[t]?.accuracy);
   }).join("");
   const known = new Set([...CURVE_GROUPS.flatMap(([, ks]) => ks.map(([k]) => k)), "step", "epoch"]);
-  const extras = allKeys.filter((k) => !known.has(k) && !k.startsWith("eval_") && !CURVE_IGNORE.test(k));
+  const extras = allKeys.filter((k) => !known.has(k) && !k.startsWith("eval_"));
   const multiples = [
     section("Benchmarks · full test set, greedy at the training budget", benches),
     ...CURVE_GROUPS.map(([title, ks]) => section(title, ks.map(([k, name]) => cell(k, name)).join(""))),
@@ -463,15 +467,15 @@ function renderRun(id) {
 // ---- tooltip + drawer
 function showTip(el) {
   const x = XAXIS[state.x], r = DATA.runs[el.dataset.run], st = r.tasks[el.dataset.task];
-  const acc = st ? st.accuracy : Number(el.dataset.y), during = st ? "" : ` · in-training eval${el.dataset.step ? ` @ step ${el.dataset.step}` : ""}`;
+  const acc = st ? st.accuracy : Number(el.dataset.y);
   const box = el.getBoundingClientRect(), wrap = el.closest(".chart-wrap").getBoundingClientRect();
   const tip = $("#tip");
-  tip.innerHTML = `<b>${esc(el.dataset.run)}</b><small>${esc(el.dataset.series)}${r.task && !el.dataset.series.includes(" ← ") ? ` · trained on ${esc(label(r.task))}` : ""} · ${pct(acc)}%${during} · ${x.fmt(r[x.key])}</small>`;
+  tip.innerHTML = `<b>${esc(el.dataset.run)}</b><small>${esc(el.dataset.series)}${r.task && !el.dataset.series.includes(" ← ") ? ` · trained on ${esc(label(r.task))}` : ""} · ${pct(acc)}% · ${x.fmt(r[x.key])}</small>`;
   tip.style.left = `${box.left + box.width / 2 - wrap.left}px`; tip.style.top = `${box.top - wrap.top}px`; tip.hidden = false;
 }
 function openDrawer(who, task, stats) {
   closeDrawer();
-  const items = stats.misses.map((r) => `<li><q>${esc(r.question)}</q><div class="pair"><span>predicted <b class="${r.predicted == null ? "none" : "pred"} mono">${r.predicted == null ? "unparsed" : esc(r.predicted)}</b></span><span>answer <b class="gold mono">${esc(r.answer)}</b></span></div></li>`);
+  const items = stats.misses.map((r) => `<li><q>${esc(DATA.questions[r.q])}</q><div class="pair"><span>predicted <b class="${r.predicted == null ? "none" : "pred"} mono">${r.predicted == null ? "unparsed" : esc(r.predicted)}</b></span><span>answer <b class="gold mono">${esc(r.answer)}</b></span></div></li>`);
   const drawer = document.createElement("aside");
   drawer.className = "drawer";
   drawer.innerHTML = `<header><div><div class="eyebrow">${esc(who)} · ${label(task)}</div><h2>${stats.misses.length} wrong of ${stats.n} <span style="color:var(--muted);font-weight:500">(${stats.unparsed} unparsed)</span></h2></div><button type="button" id="close">Close</button></header>${items.length ? `<ol>${items.join("")}</ol>` : `<div class="empty">Every answer was correct.</div>`}`;
