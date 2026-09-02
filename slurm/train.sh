@@ -3,7 +3,7 @@
 # CFG names the run dir (<adapter>-<loss>[-lr<lr>]-<cfg>); single seed: sbatch -a 0 ...
 #SBATCH -J grpo
 #SBATCH -a 0-2
-#SBATCH -p gpu-preempt
+#SBATCH -p gpu,gpu-preempt
 #SBATCH --requeue
 #SBATCH --signal=B:USR1@600
 #SBATCH --gpus=1

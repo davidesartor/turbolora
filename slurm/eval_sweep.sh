@@ -2,10 +2,10 @@
 # Eval every finished run that still lacks results, one base model per job, resubmitting itself
 # until nothing is pending (short QOS allows only one queued job). Usage: sbatch slurm/eval_sweep.sh
 #SBATCH -J eval-sweep
-#SBATCH -p gpu
+#SBATCH -p gpu,gpu-preempt
 #SBATCH -q short
 #SBATCH --gpus=1
-#SBATCH --constraint=a100|a100-80g|h100
+#SBATCH --constraint=l40s|a100|a100-80g|h100
 #SBATCH -c 8
 #SBATCH --mem=60G
 #SBATCH -t 04:00:00
