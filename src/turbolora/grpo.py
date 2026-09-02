@@ -50,7 +50,7 @@ class FullEval(TrainerCallback):
             temperature=0.0, max_tokens=max_tokens, stop=list(spec.prompt.stop)
         )
         self.trainer = (
-            None  # set after construction; .log routes metrics to wandb and log_history
+            None  # set after construction; .log routes metrics into log_history
         )
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -189,10 +189,7 @@ def run(
         logging_steps=1,
         save_steps=25,
         save_total_limit=2,
-        report_to="wandb",
-        log_completions=True,
-        num_completions_to_print=16,
-        wandb_log_unique_prompts=True,
+        report_to="none",
     )
     callbacks: list[TrainerCallback] = [SaveOnPreempt()]
     if args.eval_steps:
@@ -209,7 +206,7 @@ def run(
     )
     if args.eval_steps:
         callbacks[-1].trainer = trainer
-    # must precede the WandbCallback (which Trainer puts before user callbacks) so wandb sees the extra keys
+    # runs before the other callbacks so its extra keys are in the log dict they see
     trainer.callback_handler.callbacks.insert(0, ResourceLogger())
 
     # config half of run.json goes out before training so the dashboard can show the run while it trains

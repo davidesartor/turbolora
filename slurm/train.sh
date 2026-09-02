@@ -22,10 +22,6 @@ export HF_HOME="$PWD/.hf-cache"
 export UNSLOTH_COMPILE_LOCATION=/tmp/unsloth-cache
 export TRITON_CACHE_DIR=/tmp/triton
 export VLLM_CACHE_ROOT=/tmp/vllm
-export WANDB_PROJECT=turbolora
-export WANDB_DIR="$PWD/outputs"
-grep -qs api.wandb.ai ~/.netrc || export WANDB_MODE=offline
-
 LR="${LR:-}"
 LOSS="${LOSS:-grpo}"
 ADAPTER="${ADAPTER:?}"
@@ -34,10 +30,6 @@ TASK="${TASK:?}"
 CFG="${CFG:-}"
 RUN="${ADAPTER}-${LOSS}${LR:+-lr$LR}${CFG:+-$CFG}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
-# stable wandb run id so a requeued job resumes the same run
-export WANDB_RESUME=allow
-export WANDB_RUN_ID="${MODEL}-${TASK}-${RUN}-seed${SEED}"
-
 # preemption sends TERM (900s grace), wall-limit sends USR1: both ask python for a checkpoint
 trap 'kill -USR1 "$pid"' USR1 TERM
 cmd=(
