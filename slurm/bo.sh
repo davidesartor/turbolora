@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=u1-notie] sbatch slurm/bo.sh [--proj-dim 1 --no-tie ...]
+# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=u1-notie] sbatch slurm/bo.sh [--proj-dim 1 --untie ...]
 # CFG names the run dir (tinylora-bo[-<cfg>])
 #SBATCH -J bo
 #SBATCH -a 0-2

@@ -10,7 +10,7 @@ Everything targets math reasoning (GSM8K / MATH-style tasks, graded with `math-v
 |---|---|---|
 | `lora` | A, B (rank r) | BA |
 | `loraxs` | R ∈ ℝ^{r×r} | UΣ R Vᵀ (frozen truncated SVD) |
-| `tinylora` | v ∈ ℝᵘ, one global v (`--tie`) or one per module (`--no-tie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or BO (`train_bo`) |
+| `tinylora` | v ∈ ℝᵘ, one global v (default) or one per module (`--untie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or BO (`train_bo`) |
 
 All of them export as a standard PEFT LoRA dir so vLLM can eval them unchanged.
 
@@ -22,9 +22,9 @@ With `n` layers x 7 adapted projections (Qwen2.5-7B: 28 x 7 = 196 modules), ever
 |---|---|---|
 | `lora` | Σ r (d_in + d_out) — ~1.3M at r=1 on Qwen2.5-7B, can't go lower | alpha = 2r |
 | `loraxs` | 196 r² — 784 at r=2 | R ∈ ℝ^{r×r} per module |
-| `tinylora` | r² tied (default), 196 r² with `--no-tie` | `--proj-dim` defaults to r² (full R basis) |
+| `tinylora` | r² tied (default), 196 r² with `--untie` | `--proj-dim` defaults to r² (full R basis) |
 
-TinyLoRA with u = r² is LoRA-XS with a random basis for R, so `--no-tie` matches LoRA-XS's count; the default `--tie`
+TinyLoRA with u = r² is LoRA-XS with a random basis for R, so `--untie` matches LoRA-XS's count; the default
 shares one v across the whole network and the count is just r²: r=1 → 1, r=2 → 4, r=8 → 64, r=32 → 1024.
 The paper's 13-parameter config is `--rank 2 --proj-dim 13` (u > r² is only meaningful with tying).
 
@@ -73,7 +73,7 @@ src/turbolora/
   grpo.py            shared GRPO/GSPO trainer (Unsloth + TRL), preempt-safe checkpoints
   train_{lora,loraxs,tinylora}.py   GRPO entry points
   bo.py              generic GP + Thompson-sampling search with heteroskedastic noise
-  train_bo.py        BO entry point (TinyLoRA, θ = every v concatenated; `--tie` default, `--no-tie` one v per module): objective = vLLM pass rate on a random train subset
+  train_bo.py        BO entry point (TinyLoRA, θ = every v concatenated; `--untie` for one v per module): objective = vLLM pass rate on a random train subset
   eval.py            greedy vLLM eval of a base model or a trained adapter
 slurm/               baseline.sh, train.sh, bo.sh, eval.sh
 dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
@@ -95,11 +95,11 @@ MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2 sbatch slurm/train.sh --rank 
 
 # single seed, rank sweep
 for r in 1 2 8 32; do MODEL=qwen2.5-7b TASK=hard ADAPTER=loraxs CFG=r$r sbatch -a 0 slurm/train.sh --rank $r; done
-MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2-notie sbatch -a 0 slurm/train.sh --rank 2 --no-tie
+MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2-notie sbatch -a 0 slurm/train.sh --rank 2 --untie
 
 # BO, 3 seeds
 MODEL=qwen2.5-7b TASK=easy CFG=u1 sbatch slurm/bo.sh --proj-dim 1
-MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --no-tie
+MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --untie
 
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
 ADAPTERS=outputs/runs/qwen2.5-7b/hard/tinylora-grpo-r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh

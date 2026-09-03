@@ -1,4 +1,4 @@
-"""BO training of TinyLoRA: θ = every v concatenated (one global v by default), each trial scored by vLLM pass rate on a random train subset."""
+"""BO training of TinyLoRA: θ = every v concatenated (one global v unless --untie), each trial scored by vLLM pass rate on a random train subset."""
 
 import argparse
 import json
@@ -30,10 +30,9 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank", type=int, default=2, help="frozen truncated-SVD rank")
     parser.add_argument("--proj-dim", type=int, default=1, help="u: entries per v")
     parser.add_argument(
-        "--tie",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="one global v shared by every module (--no-tie: one per module, θ ∈ ℝ^{u·modules})",
+        "--untie",
+        action="store_true",
+        help="one v per module, θ ∈ ℝ^{u·modules} (default: one global v)",
     )
     # objective: mean per-question pass rate on a fresh random train subset each trial (one GRPO step of samples by default)
     parser.add_argument("--n-questions", type=int, default=grpo.PROMPTS_PER_STEP)
@@ -64,7 +63,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         args.seed,
         args.max_completion,
         proj_dim=args.proj_dim,
-        tie=0 if args.tie else 1,
+        tie=1 if args.untie else 0,
     )
     vs = [p for p in model.parameters() if p.requires_grad]  # θ = every v, concatenated
     dim = sum(v.numel() for v in vs)
@@ -126,7 +125,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         loss="bo",
         rank=args.rank,
         proj_dim=args.proj_dim,
-        tie=0 if args.tie else 1,
+        tie=1 if args.untie else 0,
         seed=args.seed,
         steps=chosen["steps"],
         params=dim,

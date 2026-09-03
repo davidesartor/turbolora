@@ -186,7 +186,7 @@ def test_run_resumes_from_latest_checkpoint(stubbed, tmp_path):
         ("train_lora", ["--rank", "4"], dict(rank=4)),
         ("train_loraxs", [], dict(rank=2)),
         ("train_tinylora", [], dict(rank=2, proj_dim=4, tie=0)),
-        ("train_tinylora", ["--rank", "3", "--proj-dim", "5", "--no-tie"], dict(rank=3, proj_dim=5, tie=1)),
+        ("train_tinylora", ["--rank", "3", "--proj-dim", "5", "--untie"], dict(rank=3, proj_dim=5, tie=1)),
     ],
 )
 def test_train_scripts_forward_adapter_args(monkeypatch, script, argv, expected):

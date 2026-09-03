@@ -222,7 +222,7 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert loads["max_seq_length"] == 512 + 1024
     assert loads["max_lora_rank"] == 8 and loads["fast_inference"]
     assert loads["gpu_memory_utilization"] == 0.45
-    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0)  # --tie default: one global v
+    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0)  # default: one global v
 
     # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per trial, no export
     trials = json.loads((out / "trials.json").read_text())
@@ -253,7 +253,7 @@ def test_run_untied_concatenates_every_v(stubbed, tmp_path):
     model, _ = stubbed
     model.linear.weight.requires_grad_(True)  # a second trainable tensor: θ ∈ ℝ^(2+15)
     FakeAdapter.attach = staticmethod(lambda m, rank, seed, **kw: (FakeAdapter.calls.update(kw), m)[1])
-    train_bo.run(parse("--no-tie", out=str(tmp_path / "run")), FakeAdapter)
+    train_bo.run(parse("--untie", out=str(tmp_path / "run")), FakeAdapter)
     summary = json.loads((tmp_path / "run" / "run.json").read_text())
     assert FakeAdapter.calls["tie"] == 1 and summary["tie"] == 1
     assert summary["params"] == 17 and len(summary["theta"]) == 17
