@@ -1,6 +1,7 @@
 """Serve the dashboard with live data from baseline evals (outputs/baselines/<model>/<task>.json) and training runs (any outputs/**/run.json or checkpoint-*/, incl. still-running ones): `uv run dashboard/serve.py`, then open http://localhost:8000."""
 
 import argparse
+import gzip
 import hashlib
 import http.server
 import json
@@ -116,8 +117,9 @@ CURVE_DROP = re.compile(
 
 
 def load_task(path: Path) -> dict:
-    """Stats for one eval JSON plus wrong-or-unparsed examples (questions truncated, completions dropped)."""
-    data = json.loads(path.read_text())
+    """Stats for one <task>.json.gz plus wrong-or-unparsed examples (questions truncated, completions dropped)."""
+    with gzip.open(path, "rt") as f:
+        data = json.load(f)
     misses = [
         dict(question=r["question"][:240], predicted=r["predicted"], answer=r["answer"])
         for r in data["records"]
@@ -127,14 +129,18 @@ def load_task(path: Path) -> dict:
 
 
 def load_curves(run_dir: Path) -> list[dict]:
-    """Per-step training metrics from the newest checkpoint's trainer_state.json (its log_history spans the whole run)."""
-    checkpoints = sorted(
-        run_dir.glob("checkpoint-*/trainer_state.json"),
-        key=lambda p: int(p.parent.name.split("-")[1]),
-    )
-    if not checkpoints:
-        return []
-    history = json.loads(checkpoints[-1].read_text())["log_history"]
+    """Per-step training metrics from curves.jsonl, or the newest checkpoint's log_history while a run is still training."""
+    curves = run_dir / "curves.jsonl"
+    if curves.exists():
+        history = [json.loads(line) for line in curves.read_text().splitlines() if line]
+    else:
+        checkpoints = sorted(
+            run_dir.glob("checkpoint-*/trainer_state.json"),
+            key=lambda p: int(p.parent.name.split("-")[1]),
+        )
+        if not checkpoints:
+            return []
+        history = json.loads(checkpoints[-1].read_text())["log_history"]
     return [
         {
             k: (float(f"{v:.4g}") if isinstance(v, float) else v)
@@ -142,8 +148,30 @@ def load_curves(run_dir: Path) -> list[dict]:
             if isinstance(v, (int, float)) and not CURVE_DROP.match(k)
         }
         for row in history
-        if "loss" in row or any(k.startswith("eval_") for k in row)
+        if "loss" in row
     ]
+
+
+def snapshots(run_dir: Path) -> list[Path]:
+    """Snapshot dirs in step order."""
+    return sorted(
+        run_dir.glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1])
+    )
+
+
+def eval_curves(run_dir: Path) -> list[dict]:
+    """One eval_<task> row per evaluated snapshot, in the same shape as the training rows."""
+    rows = []
+    for snapshot in snapshots(run_dir):
+        summary = snapshot / "eval.json"
+        if not summary.exists():
+            continue
+        row = {"step": int(snapshot.name.split("-")[1])}
+        for task, stats in json.loads(summary.read_text()).items():
+            row[f"eval_{task}"] = float(f"{stats['accuracy']:.4g}")
+            row[f"eval_{task}_unparsed"] = stats["unparsed"]
+        rows.append(row)
+    return rows
 
 
 def thin(curves: list[dict], every: int) -> list[dict]:
@@ -197,13 +225,13 @@ def checkpoint_rate(checkpoints: list[Path]) -> float | None:
     return span / 3600 / (step_of(checkpoints[-1]) - step_of(checkpoints[0]))
 
 
-def load_progress(run_dir: Path, curves: list[dict]) -> dict:
+def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
     """Step count and, for runs still training, resources so far from the latest logged step."""
     checkpoints = sorted(
         run_dir.glob("checkpoint-*/trainer_state.json"),
         key=lambda p: int(p.parent.name.split("-")[1]),
     )
-    status = "done" if (run_dir / "final_adapter").is_dir() else "running"
+    status = "done" if "steps" in summary else "running"
     progress = dict(status=status)
     if checkpoints:
         state = json.loads(checkpoints[-1].read_text())
@@ -226,7 +254,8 @@ def load_progress(run_dir: Path, curves: list[dict]) -> dict:
         save_every = steps[-1] - steps[-2] if len(steps) > 1 else steps[-1]
         rate = hours_per_step(curves) or checkpoint_rate(checkpoints)
         progress |= dict(
-            checkpoint_time=round(newest.stat().st_mtime), idle_hours=round(idle_hours, 3)
+            checkpoint_time=round(newest.stat().st_mtime),
+            idle_hours=round(idle_hours, 3),
         )
         alive = rate and idle_hours < max(2 * rate * save_every, 0.5)
         if alive:
@@ -238,14 +267,14 @@ def load_progress(run_dir: Path, curves: list[dict]) -> dict:
 def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
-    for path in sorted(baselines_dir.glob("*/*.json")):
-        name, task = path.parent.name, path.stem
+    for path in sorted(baselines_dir.glob("*/*.json.gz")):
+        name, task = path.parent.name, path.name.removesuffix(".json.gz")
         if name not in MODELS or task not in EVAL_TASKS:
             continue
         models.setdefault(name, dict(hf_id=MODELS[name].hf_id, tasks={}))
         models[name]["tasks"][task] = load_task(path)
 
-    # a run is a training output dir with run.json and/or checkpoints; eval/<task>.json holds accuracy once evaluated
+    # a run is a training output dir with run.json and/or checkpoints; its last snapshot's eval is the headline accuracy
     run_dirs = {p.parent for p in runs_dir.glob("**/run.json")} | {
         p.parent.parent for p in runs_dir.glob("**/checkpoint-*/trainer_state.json")
     }
@@ -259,14 +288,21 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         )
         if summary.get("model") not in MODELS:
             continue
+        last = snapshots(run_dir)[-1:]
         tasks = {
-            p.stem: load_task(p)
-            for p in sorted(run_dir.glob("eval/*.json"))
-            if p.stem in EVAL_TASKS
+            p.name.removesuffix(".json.gz"): load_task(p)
+            for snapshot in last
+            for p in sorted(snapshot.glob("*.json.gz"))
+            if p.name.removesuffix(".json.gz") in EVAL_TASKS
         }
         curves = thin(load_curves(run_dir), curve_every)
+        curves = sorted(
+            curves + eval_curves(run_dir), key=lambda row: row.get("step", 0)
+        )
         runs[str(rel)] = (
-            summary | load_progress(run_dir, curves) | dict(tasks=tasks, curves=curves)
+            summary
+            | load_progress(run_dir, summary, curves)
+            | dict(tasks=tasks, curves=curves)
         )
 
     # keep MODELS' declaration order so families stay grouped

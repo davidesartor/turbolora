@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Eval every finished run that still lacks results, one base model per job, resubmitting itself
+# Eval every snapshot that still lacks results, one base model per job, resubmitting itself
 # until nothing is pending (short QOS allows only one queued job). Usage: sbatch slurm/eval_sweep.sh
 #SBATCH -J eval-sweep
 #SBATCH -p gpu,gpu-preempt
@@ -18,10 +18,11 @@ export HF_HOME="$PWD/.hf-cache"
 
 TASKS="gsm8k math500 aime24 amc23 minerva olympiad"
 
-# adapters whose run is missing any task's results, newest-trained last
+# snapshots missing any task's results, oldest run first
 pending() {
-  find outputs/runs -type d -name final_adapter | sort | while read -r a; do
-    [ "$(ls "$(dirname "$a")"/eval/*.json 2>/dev/null | wc -l)" -lt 6 ] && echo "$a"
+  find outputs/runs -path "*/snapshots/step-*" -name adapter_config.json | sort | while read -r c; do
+    a=$(dirname "$c")
+    [ "$(ls "$a"/*.json.gz 2>/dev/null | wc -l)" -lt 6 ] && echo "$a"
   done
 }
 

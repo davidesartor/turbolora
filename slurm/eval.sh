@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Eval trained adapters on one shared engine load; results land in each <run>/eval/. Usage: ADAPTERS="outputs/runs/.../final_adapter ..." [TASKS="gsm8k math500"] sbatch slurm/eval.sh
+# Eval snapshots on one shared engine load; results land in each snapshot dir. Usage: ADAPTERS="outputs/runs/.../snapshots/step-000393 ..." [TASKS="gsm8k math500"] sbatch slurm/eval.sh
 #SBATCH -J eval
 #SBATCH -p gpu
 #SBATCH -q short

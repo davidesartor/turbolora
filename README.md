@@ -75,7 +75,7 @@ tests/
 collaborators-poc/   original proof-of-concept BO pipeline (kept for reference)
 ```
 
-Outputs are gitignored: `outputs/baselines/<model>/<task>.json`, `outputs/runs/<model>/<task>/<cfg>/seed<N>/` (with `run.json`, `final_adapter/`, `eval/`).
+Outputs are gitignored: `outputs/baselines/<model>/<task>.json.gz` (+ `eval.json` summary) and `outputs/runs/<model>/<task>/<cfg>/seed<N>/` with `run.json`, `curves.jsonl` (per-step training metrics, rewritten every step) and `snapshots/step-N/` at steps 1, 2, 4, … and the last: `trainable.safetensors`, the 6 `<task>.json.gz` completion sets and `eval.json`; the last snapshot also holds the PEFT export (`adapter_config.json`, `adapter_model.safetensors`) that `eval.py` loads standalone.
 
 ## Usage
 
@@ -93,8 +93,9 @@ MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2-notie sbatch -a 0 slurm/train
 # BO, 3 seeds
 MODEL=qwen2.5-7b TASK=easy sbatch slurm/bo.sh --tie 98 --proj-dim 1
 
-# eval a trained adapter
-ADAPTER=outputs/runs/qwen2.5-7b/hard/tinylora-grpo-lr5e-6-r2/seed0/final_adapter TASKS="gsm8k math500" sbatch slurm/eval.sh
+# eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
+ADAPTERS=outputs/runs/qwen2.5-7b/hard/tinylora-grpo-r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
+sbatch slurm/eval_sweep.sh   # every snapshot with a PEFT export that lacks any of the 6 tasks
 
 # locally / interactively
 uv run -m turbolora.train_tinylora --model qwen2.5-7b --task hard --out outputs/runs/x --max-steps 3

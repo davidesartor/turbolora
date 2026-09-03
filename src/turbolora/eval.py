@@ -1,6 +1,7 @@
 """Greedy (pass@1) test-set eval of a model, optionally with a trained adapter, on one or more tasks with vLLM."""
 
 import argparse
+import gzip
 import json
 import os
 import resource
@@ -42,12 +43,27 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
-def resolve_run(model: str | None, adapter: str | None, out_dir: str | None) -> tuple[str, Path]:
-    """Adapter evals live next to their run.json (model read from it); baselines go under out-dir/<model>."""
+def write_result(
+    out_dir: Path, task: str, stats: dict, records: list[dict], **meta
+) -> None:
+    """<task>.json.gz holds every record; eval.json accumulates the per-task stats."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with gzip.open(out_dir / f"{task}.json.gz", "wt", compresslevel=9) as f:
+        json.dump({"task": task, **meta, **stats, "records": records}, f)
+    summary_path = out_dir / "eval.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    summary[task] = stats
+    summary_path.write_text(json.dumps(summary, indent=1))
+
+
+def resolve_run(
+    model: str | None, adapter: str | None, out_dir: str | None
+) -> tuple[str, Path]:
+    """Snapshot evals live in the snapshot dir (model read from the run's run.json); baselines go under out-dir/<model>."""
     if adapter:
-        run_dir = Path(adapter).parent
+        run_dir = Path(adapter).parent.parent
         model = model or json.loads((run_dir / "run.json").read_text())["model"]
-        return model, Path(out_dir) if out_dir else run_dir / "eval"
+        return model, Path(out_dir) if out_dir else Path(adapter)
     if not model:
         raise SystemExit("--model is required without --adapter")
     return model, Path(out_dir or "outputs/baselines") / model
@@ -91,23 +107,28 @@ if __name__ == "__main__":
     from vllm.lora.request import LoRARequest
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=MODELS, help="defaults to the adapter's run.json")
+    parser.add_argument(
+        "--model", choices=MODELS, help="defaults to the adapter's run.json"
+    )
     parser.add_argument(
         "--adapters",
         nargs="+",
-        help="PEFT adapter dirs (<run>/final_adapter); each one's results go to its own <run>/eval/",
+        help="snapshot dirs (<run>/snapshots/step-N); each one's results go into that dir",
     )
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--tp", type=int, default=1, help="tensor parallel size (GPUs)")
     parser.add_argument(
-        "--out-dir", help="baselines: <out-dir>/<model>/<task>.json (default outputs/baselines)"
+        "--out-dir",
+        help="baselines: <out-dir>/<model>/<task>.json.gz (default outputs/baselines)",
     )
     parser.add_argument(
         "--show", type=int, default=0, help="print first N completions per task"
     )
     parser.add_argument(
-        "--skip-existing", action="store_true", help="leave already-written <task>.json alone"
+        "--skip-existing",
+        action="store_true",
+        help="leave already-written <task>.json.gz alone",
     )
     args = parser.parse_args()
 
@@ -160,7 +181,7 @@ if __name__ == "__main__":
         ]
 
         for task in args.tasks:
-            out_path = out_dir / f"{task}.json"
+            out_path = out_dir / f"{task}.json.gz"
             if args.skip_existing and out_path.exists():
                 print(f"skipping {out_path}")
                 continue
@@ -180,12 +201,8 @@ if __name__ == "__main__":
                 f"{stats['seconds']}s, {stats['vram_used_gb']}/{stats['vram_total_gb']} GB on {stats['gpu']}"
             )
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(
-                json.dumps(
-                    {"model": spec.hf_id, "adapter": adapter, "task": task, **stats, "records": records},
-                    indent=2,
-                )
+            write_result(
+                out_dir, task, stats, records, model=spec.hf_id, adapter=adapter
             )
             print(f"wrote {out_path}")
 

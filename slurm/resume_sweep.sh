@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Resubmit every run that has no final_adapter, one array per config with only the
+# Resubmit every unfinished run (run.json lacks `steps`), one array per config with only the
 # missing seeds. Prints the sbatch lines; set GO=1 to actually submit.
 # Usage: [GO=1] [STAGGER=45] slurm/resume_sweep.sh
 set -e
@@ -13,7 +13,7 @@ for run_dir in $(find outputs/runs -mindepth 3 -maxdepth 3 -type d | sort); do
 
     seeds=""
     for s in 0 1 2; do
-        [ -d "$run_dir/seed$s/final_adapter" ] || seeds="$seeds,$s"
+        grep -q '"steps"' "$run_dir/seed$s/run.json" 2>/dev/null || seeds="$seeds,$s"
     done
     [ -z "$seeds" ] && continue
 

@@ -461,7 +461,7 @@ function renderRun(id) {
       <div class="chips">${meta}</div>
       ${multiples || `<div class="placeholder">No training curves: no <code>checkpoint-*/trainer_state.json</code> in the run dir.</div>`}
     </div>
-    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; eval once <code>final_adapter/</code> exists — " : "Not evaluated yet — "}<code>ADAPTER=outputs/${esc(id)}/final_adapter sbatch slurm/eval.sh</code></div>`}`;
+    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>sbatch slurm/eval_sweep.sh</code></div>`}`;
 }
 
 // ---- tooltip + drawer

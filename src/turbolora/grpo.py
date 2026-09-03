@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -10,13 +11,14 @@ from pathlib import Path
 from unsloth import FastLanguageModel  # noqa: F401  must import before trl/transformers
 
 import torch
+from safetensors.torch import save_file
 from transformers import TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer
 from vllm import SamplingParams
 
 from turbolora.adapters import Adapter
-from turbolora.eval import evaluate, summarize
+from turbolora.eval import evaluate, summarize, write_result
 from turbolora.models import MODELS, Model
 from turbolora.tasks import TASKS, reward
 
@@ -38,24 +40,42 @@ class SaveOnPreempt(TrainerCallback):
             self.requested = False
 
 
-class FullEval(TrainerCallback):
-    """Greedy full-test-set eval every `eval_steps` steps through the colocated vLLM engine, at the training completion budget."""
+class Snapshot(TrainerCallback):
+    """At steps 1, 2, 4, ... and the last: save the trainable tensors to snapshots/step-N and eval greedily on the full test sets.
+
+    Only the last snapshot also gets the full PEFT export, which eval.py loads standalone; earlier ones
+    are rebuilt by `Adapter.attach(model, rank, seed)` + loading trainable.safetensors (the frozen bases are seeded).
+    """
 
     def __init__(
-        self, model, spec: Model, tasks: list[str], eval_steps: int, max_tokens: int
+        self,
+        model,
+        adapter: type[Adapter],
+        spec: Model,
+        tasks: list[str],
+        max_tokens: int,
+        root: Path,
     ):
-        self.model, self.spec, self.eval_steps = model, spec, eval_steps
+        self.model, self.adapter, self.spec, self.root = model, adapter, spec, root
         self.datasets = {task: TASKS[task]("test") for task in tasks}
         self.sampling = SamplingParams(
             temperature=0.0, max_tokens=max_tokens, stop=list(spec.prompt.stop)
         )
-        self.trainer = (
-            None  # set after construction; .log routes metrics into log_history
-        )
 
     def on_step_end(self, args, state, control, **kwargs):
-        if state.global_step % self.eval_steps:
+        step = state.global_step
+        if step & (step - 1) and step != state.max_steps:  # not a power of two
             return
+        out_dir = self.root / f"step-{step:06d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        trainable = {
+            name: p.detach().cpu().contiguous()
+            for name, p in self.model.named_parameters()
+            if p.requires_grad
+        }
+        save_file(trainable, out_dir / "trainable.safetensors")
+        if step == state.max_steps:
+            self.adapter.export(self.model, str(out_dir))
         # same call the rollout path uses: a LoRARequest built from the live state_dict
         request = self.model.load_lora("eval_lora", load_tensors=True)
         generate = lambda prompts: [
@@ -65,20 +85,16 @@ class FullEval(TrainerCallback):
             )
         ]
         for task, dataset in self.datasets.items():
-            stats = summarize(evaluate(generate, self.spec, dataset))
+            records = evaluate(generate, self.spec, dataset)
+            stats = summarize(records)
             print(
-                f"[step {state.global_step} {task}] accuracy: {stats['accuracy']:.4f} ({stats['n_correct']}/{stats['n']})"
+                f"[step {step} {task}] accuracy: {stats['accuracy']:.4f} ({stats['n_correct']}/{stats['n']})"
             )
-            self.trainer.log(
-                {
-                    f"eval_{task}": stats["accuracy"],
-                    f"eval_{task}_unparsed": stats["unparsed"],
-                }
-            )
+            write_result(out_dir, task, stats, records, step=step)
 
 
-class ResourceLogger(TrainerCallback):
-    """Adds peak VRAM and elapsed wall time to every logged step."""
+class CurveLogger(TrainerCallback):
+    """Stamps peak VRAM and elapsed wall time on every logged step and rewrites curves.jsonl from log_history."""
 
     def on_train_begin(self, args, state, control, **kwargs):
         self.start = time.time()
@@ -92,6 +108,9 @@ class ResourceLogger(TrainerCallback):
         # Trainer.log copies into log_history before on_log, so stamp the checkpointed copy too
         if state.log_history and state.log_history[-1].get("step") == state.global_step:
             state.log_history[-1].update(extra)
+        # rewritten whole every step: resume-safe, and the curve outlives the rotating checkpoints
+        with (Path(args.output_dir) / "curves.jsonl").open("w") as f:
+            f.writelines(json.dumps(row) + "\n" for row in state.log_history)
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -111,13 +130,15 @@ def argument_parser() -> argparse.ArgumentParser:
         "--max-steps", type=int, default=-1, help="cap optimizer steps (smoke runs)"
     )
     parser.add_argument(
-        "--eval-steps",
-        type=int,
-        default=25,
-        help="full-bench eval through the training engine every N steps (0 = off)",
+        "--no-eval",
+        action="store_true",
+        help="snapshot adapters only, skip their evals",
     )
     parser.add_argument(
-        "--eval-tasks", nargs="+", choices=TASKS, default=["gsm8k", "math500"]
+        "--eval-tasks",
+        nargs="+",
+        choices=TASKS,
+        default=["gsm8k", "math500", "aime24", "amc23", "minerva", "olympiad"],
     )
     return parser
 
@@ -125,7 +146,7 @@ def argument_parser() -> argparse.ArgumentParser:
 def run(
     args: argparse.Namespace, adapter: type[Adapter], rank: int, **adapter_kwargs
 ) -> None:
-    """Load the base, attach `adapter`, train with GRPO/GSPO, export to `<out>/final_adapter`, write run.json."""
+    """Load the base, attach `adapter`, train with GRPO/GSPO, snapshot+eval at steps 1, 2, 4, ..., write run.json."""
     args.out = str(Path(args.out).resolve())
     outputs_dir = Path("outputs").resolve()
     run_name = (
@@ -191,11 +212,17 @@ def run(
         save_total_limit=2,
         report_to="none",
     )
-    callbacks: list[TrainerCallback] = [SaveOnPreempt()]
-    if args.eval_steps:
-        callbacks.append(
-            FullEval(model, spec, args.eval_tasks, args.eval_steps, args.max_completion)
-        )
+    callbacks: list[TrainerCallback] = [
+        SaveOnPreempt(),
+        Snapshot(
+            model,
+            adapter,
+            spec,
+            [] if args.no_eval else args.eval_tasks,
+            args.max_completion,
+            Path(args.out) / "snapshots",
+        ),
+    ]
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
@@ -204,10 +231,8 @@ def run(
         train_dataset=dataset,
         callbacks=callbacks,
     )
-    if args.eval_steps:
-        callbacks[-1].trainer = trainer
     # runs before the other callbacks so its extra keys are in the log dict they see
-    trainer.callback_handler.callbacks.insert(0, ResourceLogger())
+    trainer.callback_handler.callbacks.insert(0, CurveLogger())
 
     # config half of run.json goes out before training so the dashboard can show the run while it trains
     summary = dict(
@@ -229,10 +254,9 @@ def run(
     os.chdir(args.out)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    adapter_dir = Path(args.out) / "final_adapter"
-    adapter.export(model, str(adapter_dir))
-    tokenizer.save_pretrained(str(adapter_dir))
-    print(f"saved adapter to {adapter_dir}")
+    # the last snapshot holds the final adapter; the resume checkpoints have nothing else
+    for checkpoint in Path(args.out).glob("checkpoint-*"):
+        shutil.rmtree(checkpoint)
 
     # resource summary the dashboard plots accuracy against
     peak_vram_gb = torch.cuda.max_memory_allocated() / 2**30
