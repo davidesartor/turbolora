@@ -1,5 +1,6 @@
 #!/bin/bash -l
-# Seed array for a BO (TurboLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k sbatch slurm/bo.sh [--tie 98 --proj-dim 1 ...]
+# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=u1-notie] sbatch slurm/bo.sh [--proj-dim 1 --no-tie ...]
+# CFG names the run dir (tinylora-bo[-<cfg>])
 #SBATCH -J bo
 #SBATCH -a 0-2
 #SBATCH -p gpu-preempt
@@ -23,10 +24,10 @@ SEED="${SLURM_ARRAY_TASK_ID:?}"
 
 # preemption sends TERM (900s grace), wall-limit sends USR1: python finishes the running trial and exits; trials.json resumes
 trap 'kill -USR1 "$pid"' USR1 TERM
-uv run -m turbolora.train_turbolora \
+uv run -m turbolora.train_bo \
     --model "$MODEL" \
     --task "$TASK" \
-    --out "outputs/runs/${MODEL}/${TASK}/turbolora-bo/seed${SEED}" \
+    --out "outputs/runs/${MODEL}/${TASK}/tinylora-bo${CFG:+-$CFG}/seed${SEED}" \
     --seed "$SEED" \
     "$@" &
 pid=$!

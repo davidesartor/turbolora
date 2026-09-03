@@ -66,7 +66,7 @@ src/turbolora/
   grpo.py            shared GRPO/GSPO trainer (Unsloth + TRL), preempt-safe checkpoints
   train_{lora,loraxs,tinylora}.py   GRPO entry points
   bo.py              generic GP + Thompson-sampling search with heteroskedastic noise
-  train_turbolora.py BO entry point: objective = vLLM pass rate on a random train subset
+  train_bo.py        BO entry point (TinyLoRA, θ = every v concatenated; `--tie` default, `--no-tie` one v per module): objective = vLLM pass rate on a random train subset
   eval.py            greedy vLLM eval of a base model or a trained adapter
 slurm/               baseline.sh, train.sh, bo.sh, eval.sh
 dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
@@ -91,7 +91,8 @@ for r in 1 2 8 32; do MODEL=qwen2.5-7b TASK=hard ADAPTER=loraxs CFG=r$r sbatch -
 MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2-notie sbatch -a 0 slurm/train.sh --rank 2 --no-tie
 
 # BO, 3 seeds
-MODEL=qwen2.5-7b TASK=easy sbatch slurm/bo.sh --tie 98 --proj-dim 1
+MODEL=qwen2.5-7b TASK=easy CFG=u1 sbatch slurm/bo.sh --proj-dim 1
+MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --no-tie
 
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
 ADAPTERS=outputs/runs/qwen2.5-7b/hard/tinylora-grpo-r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
