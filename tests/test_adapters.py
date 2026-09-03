@@ -6,7 +6,7 @@ import torch
 from peft import PeftModel
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-from turbolora.adapters import LoRAXS, TinyLoRA, TurboLoRA
+from turbolora.adapters import LoRAXS, TinyLoRA
 
 CONFIG = Qwen2Config(
     hidden_size=32,
@@ -44,18 +44,7 @@ def test_tinylora_starts_at_zero_delta():
     assert torch.all(layer.lora_B["default"].weight == 0)
 
 
-def test_turbolora_splits_sigma_symmetrically():
-    tiny = attach(TinyLoRA).base_model.model.model.layers[0].self_attn.q_proj
-    turbo = attach(TurboLoRA).base_model.model.model.layers[0].self_attn.q_proj
-    a_tiny, a_turbo = tiny.lora_A["default"].weight, turbo.lora_A["default"].weight
-    us_tiny, us_turbo = tiny.lora_B["default"].B0, turbo.lora_B["default"].B0
-    assert torch.allclose(a_turbo.norm(dim=1), us_turbo.norm(dim=0), atol=1e-5)
-    assert torch.allclose(a_turbo.norm(dim=1) ** 2, us_tiny.norm(dim=0), atol=1e-4)
-    assert torch.allclose(us_turbo.T @ us_turbo, a_turbo @ a_turbo.T, atol=1e-4)
-    assert torch.allclose(us_tiny @ a_tiny, us_turbo @ a_turbo, atol=1e-4)
-
-
-@pytest.mark.parametrize("adapter", [LoRAXS, TinyLoRA, TurboLoRA])
+@pytest.mark.parametrize("adapter", [LoRAXS, TinyLoRA])
 def test_gradients_reach_trainable_params(adapter):
     model = attach(adapter)
     x = torch.randint(0, 100, (1, 8))
@@ -64,7 +53,7 @@ def test_gradients_reach_trainable_params(adapter):
     assert all(g is not None and g.abs().sum() > 0 for g in grads)
 
 
-@pytest.mark.parametrize("adapter", [LoRAXS, TinyLoRA, TurboLoRA])
+@pytest.mark.parametrize("adapter", [LoRAXS, TinyLoRA])
 def test_export_is_plain_lora_dir(adapter, tmp_path):
     model = attach(adapter, **({} if adapter is LoRAXS else {"proj_dim": 3, "tie": 7}))
     with torch.no_grad():

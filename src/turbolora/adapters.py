@@ -112,7 +112,7 @@ class LoRAXS(Adapter):
     """
 
     @staticmethod
-    def attach(model, rank: int, seed: int, **_) -> nn.Module:
+    def attach(model, rank: int, seed: int, **kwargs) -> nn.Module:
         model, svds = svd_lora_layers(model, rank, seed)
         for layer, U, S, Vh in svds:
             lora_a = cast(nn.Linear, layer.lora_A["default"])
@@ -179,7 +179,7 @@ class TinyLoRA(Adapter):
 
     @staticmethod
     def attach(
-        model, rank: int, seed: int, proj_dim: int = 1, tie: int = 1, **_
+        model, rank: int, seed: int, proj_dim: int = 1, tie: int = 1, **kwargs
     ) -> nn.Module:
         model, svds = svd_lora_layers(model, rank, seed)
         generator = torch.Generator().manual_seed(seed)
@@ -202,47 +202,6 @@ class TinyLoRA(Adapter):
             setattr(layer, "lora_v", nn.ParameterDict({"default": vs[i // tie]}))
         print(
             f"{len(svds)} TinyLoRA modules, u={proj_dim}, tie={tie} -> {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
-        )
-        return model
-
-    @staticmethod
-    def export(model, out_dir: str) -> None:
-        """PEFT save with the materialized lora_B, minus the `lora_v` entries vLLM's loader rejects."""
-        tensors = {k: t for k, t in model.state_dict().items() if ".lora_v" not in k}
-        model.save_pretrained(out_dir, state_dict=tensors)
-
-
-class TurboLoRA(Adapter):
-    """TinyLoRA with the Σ convention: W' = W + U√Σ(Σᵢ vᵢPᵢ)√ΣVᵀ.
-
-    Same family as TinyLoRA (R ↦ Σ^{-½}RΣ^{½}) but a different random subspace for fixed Pᵢ; symmetric under W ↦ Wᵀ.
-    """
-
-    @staticmethod
-    def attach(
-        model, rank: int, seed: int, proj_dim: int = 1, tie: int = 1, **_
-    ) -> nn.Module:
-        model, svds = svd_lora_layers(model, rank, seed)
-        generator = torch.Generator().manual_seed(seed)
-        device = svds[0][0].weight.device
-        tie = tie or len(svds)  # 0 = one global v
-        # one trainable v per `tie` consecutive modules
-        vs = [
-            nn.Parameter(torch.zeros(proj_dim, device=device))
-            for _ in range(-(-len(svds) // tie))
-        ]
-        for i, (layer, U, S, Vh) in enumerate(svds):
-            lora_a = cast(nn.Linear, layer.lora_A["default"])
-            lora_a.weight.data.copy_(S.sqrt()[:, None] * Vh)
-            lora_a.weight.requires_grad_(False)
-            P = torch.randn(proj_dim, rank, rank, generator=generator).to(device)
-            layer.lora_B["default"] = TinyLoRA_B(
-                U * S.sqrt(), P, vs[i // tie], layer.weight.dtype
-            )
-            # trainable tensor goes under `lora_v` so PEFT checkpoints it for resume
-            setattr(layer, "lora_v", nn.ParameterDict({"default": vs[i // tie]}))
-        print(
-            f"{len(svds)} TurboLoRA modules, u={proj_dim}, tie={tie} -> {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
         )
         return model
 

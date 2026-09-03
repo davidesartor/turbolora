@@ -10,8 +10,7 @@ Everything targets math reasoning (GSM8K / MATH-style tasks, graded with `math-v
 |---|---|---|
 | `lora` | A, B (rank r) | BA |
 | `loraxs` | R ∈ ℝ^{r×r} | UΣ R Vᵀ (frozen truncated SVD) |
-| `tinylora` | v ∈ ℝᵘ, one global v (`--tie`) or one per module (`--no-tie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ |
-| `turbolora` | same as TinyLoRA | U√Σ (Σᵢ vᵢPᵢ) √ΣVᵀ, trained by BO instead of GRPO |
+| `tinylora` | v ∈ ℝᵘ, one global v (`--tie`) or one per module (`--no-tie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or BO (`train_bo`) |
 
 All of them export as a standard PEFT LoRA dir so vLLM can eval them unchanged.
 
@@ -24,7 +23,6 @@ With `n` layers x 7 adapted projections (Qwen2.5-7B: 28 x 7 = 196 modules), ever
 | `lora` | Σ r (d_in + d_out) — ~1.3M at r=1 on Qwen2.5-7B, can't go lower | alpha = 2r |
 | `loraxs` | 196 r² — 784 at r=2 | R ∈ ℝ^{r×r} per module |
 | `tinylora` | r² tied (default), 196 r² with `--no-tie` | `--proj-dim` defaults to r² (full R basis) |
-| `turbolora` | u · ⌈196 / n_tie⌉ | `--proj-dim`, `--tie` (BO PoC defaults: u=1, tie=98) |
 
 TinyLoRA with u = r² is LoRA-XS with a random basis for R, so `--no-tie` matches LoRA-XS's count; the default `--tie`
 shares one v across the whole network and the count is just r²: r=1 → 1, r=2 → 4, r=8 → 64, r=32 → 1024.
@@ -53,8 +51,17 @@ lr·r·√u (TinyLoRA, ‖Pᵢ‖ ≈ r), and the default sets it to 1e-3 for ev
 runs showed: configs at ‖ΔR‖ ≤ 3e-4 per step stayed flat for 200+ steps, and the one at 5e-3 learned fast then
 diverged. Since all these adapters share the same frozen U, Σ, Vᵀ, equal ‖ΔR‖ is equal weight-space speed.
 
-Current sweep: Qwen2.5-7B (base) on `hard`, seed 0, rank ∈ {1, 2, 8, 32} for `lora`, `loraxs`,
-`tinylora` and `tinylora --no-tie` (`CFG=r<rank>[-notie]`).
+### Sweeps (3 seeds each)
+
+| models | task | `lora` r | `loraxs` r | `tinylora` r2, tied, u |
+|---|---|---|---|---|
+| Qwen2.5-1.5B | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 4, 16, 64, 256, 1024 |
+| Qwen2.5-1.5B-Instruct | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1 |
+| Qwen2.5-1.5B-Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 64, 256 |
+| Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 4, 16, 64, 256, 1024 |
+| Qwen2.5-3B | hard | — | 1, 2 | 1, 4, 16, 32 |
+
+Not yet launched for 3B: `lora` r1/2/8/32, `loraxs` r8/32 and `tinylora` u256 (held back on 2026-09-03 to save GPU hours).
 
 ## Layout
 
