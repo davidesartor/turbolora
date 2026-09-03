@@ -1,6 +1,5 @@
 """Wiring tests for grpo.run with unsloth (conftest), trl and CUDA stubbed; nothing here trains."""
 
-import importlib.machinery
 import json
 import os
 import runpy
@@ -15,31 +14,7 @@ import torch
 from datasets import Dataset
 
 
-class FakeGRPOConfig:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
-class FakeGRPOTrainer:
-    instances: list["FakeGRPOTrainer"] = []
-
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-        self.state = types.SimpleNamespace(global_step=7)
-        # as transformers.Trainer: user callbacks live on callback_handler, after the built-in ones
-        self.callback_handler = types.SimpleNamespace(callbacks=[object(), *kwargs.get("callbacks", [])])
-        Path(self.args.output_dir).mkdir(parents=True, exist_ok=True)  # as transformers.Trainer.__init__ does
-        FakeGRPOTrainer.instances.append(self)
-
-    def train(self, resume_from_checkpoint=None):
-        self.resume_from_checkpoint = resume_from_checkpoint
-
-
-trl = types.ModuleType("trl")
-trl.__spec__ = importlib.machinery.ModuleSpec("trl", None)
-trl.GRPOConfig = FakeGRPOConfig  # type: ignore[attr-defined]
-trl.GRPOTrainer = FakeGRPOTrainer  # type: ignore[attr-defined]
-sys.modules["trl"] = trl
+from trl import GRPOConfig as FakeGRPOConfig, GRPOTrainer as FakeGRPOTrainer  # noqa: E402  conftest stubs
 
 import unsloth  # noqa: E402  conftest stub
 from turbolora import grpo  # noqa: E402
@@ -98,7 +73,7 @@ def parse(*extra: str, out: str):
 def test_argument_parser_defaults(tmp_path):
     args = parse(out=str(tmp_path))
     assert (args.loss, args.lr, args.seed, args.epochs, args.max_completion, args.max_steps) == (
-        "grpo", 5e-6, 0, 3, 1024, -1)
+        "grpo", None, 0, 3, 1024, -1)
 
 
 def test_argument_parser_rejects_unknown_model():
@@ -106,14 +81,16 @@ def test_argument_parser_rejects_unknown_model():
         grpo.argument_parser().parse_args(["--model", "gpt-9", "--task", "gsm8k", "--out", "o"])
 
 
-def test_resource_logger_adds_vram_and_time(monkeypatch):
+def test_curve_logger_adds_vram_and_time(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 2**30)
-    logger = grpo.ResourceLogger()
+    logger = grpo.CurveLogger()
     logger.on_train_begin(None, None, None)
     logs = {"loss": 0.1}
     state = SimpleNamespace(global_step=7, log_history=[{"loss": 0.1, "step": 7}])
-    logger.on_log(None, state, None, logs=logs)
+    logger.on_log(SimpleNamespace(output_dir=str(tmp_path)), state, None, logs=logs)
     assert logs["peak_vram_gib"] == 1.0
+    assert state.log_history[-1]["peak_vram_gib"] == 1.0
+    assert json.loads((tmp_path / "curves.jsonl").read_text())["step"] == 7
     assert 0 <= logs["elapsed_hours"] < 1e-3
     # Trainer copies logs into log_history before on_log; the checkpointed copy must get the keys too
     assert state.log_history[-1]["peak_vram_gib"] == 1.0
@@ -146,15 +123,15 @@ def test_run_wires_model_adapter_data_and_outputs(stubbed, tmp_path):
     assert stubbed["max_seq_length"] == 512 + 1024
     assert stubbed["max_lora_rank"] == 8
     assert stubbed["gpu_memory_utilization"] == 0.45
-    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=3, export=str(out / "final_adapter"))
+    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=3)  # export happens in Snapshot at the last step
 
     # trainer gets raw-text prompts (no chat template), our reward and the resource logger
     (trainer,) = FakeGRPOTrainer.instances
     assert trainer.train_dataset["prompt"] == [spec.prompt(q) for q in DATASET["question"]]
     assert trainer.reward_funcs == [grpo.reward]
     callbacks = trainer.callback_handler.callbacks
-    assert type(callbacks[0]) is grpo.ResourceLogger  # before WandbCallback so wandb sees its keys
-    assert {type(c) for c in callbacks[1:] if not type(c) is object} == {grpo.SaveOnPreempt}
+    assert type(callbacks[0]) is grpo.CurveLogger  # first, so the others see its extra log keys
+    assert {type(c) for c in callbacks[1:] if not type(c) is object} == {grpo.SaveOnPreempt, grpo.Snapshot}
     assert trainer.resume_from_checkpoint is None
     config = trainer.args
     assert config.output_dir == str(out)
