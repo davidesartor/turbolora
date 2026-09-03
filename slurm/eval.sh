@@ -15,4 +15,4 @@ cd "${SLURM_SUBMIT_DIR:?}"
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
 
-uv run -m turbolora.eval --adapters ${ADAPTERS:?} --tasks ${TASKS:-gsm8k} ${SHOW:+--show $SHOW} --tp "${TP:-1}" --skip-existing
+"$HOME/.local/bin/uv" run -m turbolora.eval --adapters ${ADAPTERS:?} --tasks ${TASKS:-gsm8k} ${SHOW:+--show $SHOW} --tp "${TP:-1}" --skip-existing

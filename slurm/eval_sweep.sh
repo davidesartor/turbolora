@@ -34,7 +34,7 @@ model=$(cut -d/ -f3 <<< "$next")
 adapters=$(pending | grep "^outputs/runs/$model/" | tr '\n' ' ')
 echo "evaluating $(wc -w <<< "$adapters") adapters of $model"
 
-uv run -m turbolora.eval --adapters $adapters --tasks $TASKS --skip-existing
+"$HOME/.local/bin/uv" run -m turbolora.eval --adapters $adapters --tasks $TASKS --skip-existing
 
 # short QOS allows one submitted job per user, so this resubmit is refused while this job still holds the slot
 left=$(pending | wc -l)
