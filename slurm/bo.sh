@@ -3,7 +3,7 @@
 # CFG names the run dir (tinylora-bo[-<cfg>])
 #SBATCH -J bo
 #SBATCH -a 0-2
-#SBATCH -p gpu-preempt
+#SBATCH -p gpu,gpu-preempt
 #SBATCH --requeue
 #SBATCH --signal=B:USR1@600
 #SBATCH --gpus=1
@@ -24,7 +24,7 @@ SEED="${SLURM_ARRAY_TASK_ID:?}"
 
 # preemption sends TERM (900s grace), wall-limit sends USR1: python finishes the running trial and exits; trials.json resumes
 trap 'kill -USR1 "$pid"' USR1 TERM
-uv run -m turbolora.train_bo \
+"$HOME/.local/bin/uv" run -m turbolora.train_bo \
     --model "$MODEL" \
     --task "$TASK" \
     --out "outputs/runs/${MODEL}/${TASK}/tinylora-bo${CFG:+-$CFG}/seed${SEED}" \
