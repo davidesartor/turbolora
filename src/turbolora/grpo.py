@@ -8,7 +8,7 @@ import signal
 import time
 from pathlib import Path
 
-from unsloth import FastLanguageModel  # noqa: F401  must import before trl/transformers
+from unsloth import FastLanguageModel  # must import before trl/transformers
 
 import torch
 from safetensors.torch import save_file
@@ -24,6 +24,24 @@ from turbolora.tasks import TASKS, reward
 
 # target per-step ‖ΔR‖_F: Adam moves each param ~lr/step, so lr = R_STEP_NORM / (r·√u)
 R_STEP_NORM = 1e-3
+PROMPTS_PER_STEP = 64
+ROLLOUTS_PER_PROMPT = 4
+MAX_PROMPT_LENGTH = 512  # 75 of 8521 hard prompts exceed it and are dropped
+
+
+def load_model(spec: Model, adapter: type[Adapter], rank: int, seed: int, max_completion: int, **adapter_kwargs):
+    """Base weights + colocated vLLM, with `adapter` attached; shared by the GRPO and BO trainers."""
+    # smaller GPUs (L40S 48G, A100 40G): give vLLM a larger share so its KV cache stays usable
+    vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=spec.hf_id,
+        max_seq_length=MAX_PROMPT_LENGTH + max_completion,
+        load_in_4bit=False,
+        fast_inference=True,
+        max_lora_rank=max(rank, 8),  # vLLM accepts only {1, 8, 16, ...}; pads smaller adapters
+        gpu_memory_utilization=0.5 if vram_gb < 60 else 0.45,
+    )
+    return adapter.attach(model, rank, seed, **adapter_kwargs), tokenizer
 
 
 class SaveOnPreempt(TrainerCallback):
@@ -156,21 +174,7 @@ def run(
     )
     spec = MODELS[args.model]
 
-    max_prompt_length = 512  # 75 of 8521 hard prompts exceed it and are dropped below
-
-    # smaller GPUs (L40S 48G, A100 40G): give vLLM a larger share so its KV cache stays usable
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
-    vllm_share = 0.5 if vram_gb < 60 else 0.45
-
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=spec.hf_id,
-        max_seq_length=max_prompt_length + args.max_completion,
-        load_in_4bit=False,
-        fast_inference=True,
-        max_lora_rank=max(rank, 8),
-        gpu_memory_utilization=vllm_share,
-    )
-    model = adapter.attach(model, rank, args.seed, **adapter_kwargs)
+    model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, **adapter_kwargs)
 
     # raw-text prompts as in SimpleRL-Zoo: TRL then skips the tokenizer's chat template
     dataset = TASKS[args.task]("train").map(
@@ -178,7 +182,7 @@ def run(
     )
     # the colocated vLLM path never truncates prompts, and an over-long batch crashes Unsloth's compiled loss
     dataset = dataset.filter(
-        lambda r: len(tokenizer(r["prompt"]).input_ids) <= max_prompt_length
+        lambda r: len(tokenizer(r["prompt"]).input_ids) <= MAX_PROMPT_LENGTH
     )
 
     # paper setup: 64 problems x 4 generations = 256 completions per optimizer step
@@ -190,13 +194,13 @@ def run(
         lr_scheduler_type="constant_with_warmup",
         warmup_steps=10,
         optim="adamw_8bit",
-        num_generations=4,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=64,
+        num_generations=ROLLOUTS_PER_PROMPT,
+        per_device_train_batch_size=ROLLOUTS_PER_PROMPT,
+        gradient_accumulation_steps=PROMPTS_PER_STEP,
         beta=0.0,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,
-        max_prompt_length=max_prompt_length,
+        max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=args.max_completion,
         generation_kwargs={"stop": list(spec.prompt.stop)},
         seed=args.seed,
@@ -267,5 +271,5 @@ def run(
     )
     (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
     print(
-        f"peak VRAM: {peak_vram_gb:.1f} GiB of {vram_gb:.0f}, {summary['params']} trainable params"
+        f"peak VRAM: {peak_vram_gb:.1f} GiB, {summary['params']} trainable params"
     )
