@@ -40,11 +40,23 @@ def argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def max_grpo_displacement(n_prompts: int, rank: int, proj_dim: int) -> float:
-    """How far Adam can carry one entry of v on train_tinylora's default schedule: ~lr per step, every step of every epoch."""
-    lr = grpo.R_STEP_NORM / (rank * proj_dim**0.5)
+def grpo_steps(n_prompts: int) -> int:
+    """Optimizer steps train_tinylora takes on its default schedule: every step of every epoch."""
     epochs = grpo.argument_parser().get_default("epochs")
-    return lr * epochs * math.ceil(n_prompts / grpo.PROMPTS_PER_STEP)
+    return epochs * math.ceil(n_prompts / grpo.PROMPTS_PER_STEP)
+
+
+def grpo_budget_trials(n_prompts: int, n_questions: int, k_rollouts: int) -> int:
+    """Trials that sample as many completions as train_tinylora's default schedule."""
+    epochs = grpo.argument_parser().get_default("epochs")
+    completions = epochs * n_prompts * grpo.ROLLOUTS_PER_PROMPT
+    return math.ceil(completions / (n_questions * k_rollouts))
+
+
+def max_grpo_displacement(n_prompts: int, rank: int, proj_dim: int) -> float:
+    """How far Adam can carry one entry of v on train_tinylora's default schedule: ~lr per step."""
+    lr = grpo.R_STEP_NORM / (rank * proj_dim**0.5)
+    return lr * grpo_steps(n_prompts)
 
 
 def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
@@ -65,7 +77,9 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         proj_dim=args.proj_dim,
         tie=1 if args.untie else 0,
     )
-    vs = [p for p in model.parameters() if p.requires_grad]  # θ = every v, concatenated
+    vs = [
+        p for p in model.parameters() if p.requires_grad
+    ]  # the distinct v's, module order
     dim = sum(v.numel() for v in vs)
     model.requires_grad_(False)  # search only: no autograd graph anywhere
     print(f"{adapter.__name__}: {len(vs)} v's, θ ∈ ℝ^{dim}")
@@ -75,6 +89,9 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     if args.theta_range is None:
         args.theta_range = max_grpo_displacement(len(dataset), args.rank, args.proj_dim)
         print(f"theta range ±{args.theta_range:.4f} (GRPO max displacement)")
+    if args.n_evals is None:
+        args.n_evals = grpo_budget_trials(len(dataset), args.n_questions, args.k_rollouts)
+        print(f"n_evals {args.n_evals} (GRPO completion budget)")
 
     def objective(theta: Float[Tensor, "T"], trial: int) -> tuple[float, float]:
         """Mean over questions of the K-rollout pass rate; SEM across questions, floored."""
@@ -82,7 +99,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         batch = dataset.select(
             rng.choice(len(dataset), args.n_questions, replace=False)
         )
-        vector_to_parameters(theta.to(vs[0]), vs)
+        vector_to_parameters(theta.to(vs[0]), vs)  # θ = every v concatenated
         # same call grpo.Snapshot uses: a fresh-id LoRARequest built from the live state_dict, no export
         request = model.load_lora(str(candidate_dir), load_tensors=True)
         outputs = model.fast_generate(
@@ -97,12 +114,12 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
                 seed=args.seed + trial,
             ),
         )
-        scores = np.array(
-            [
-                np.mean([grade(extract(o.text), a) for o in r.outputs])
-                for r, a in zip(outputs, batch["answer"])
-            ]
-        )
+        scores = [
+            np.mean([grade(extract(o.text), a) for o in r.outputs])
+            for r, a in zip(outputs, batch["answer"])
+        ]
+        scores = np.array(scores)
+
         # noise from the Beta(½,½) posterior on the pass rate: never 0, even when every question scores the same
         n, m = len(scores), (scores.sum() + 0.5) / (len(scores) + 1)
         return float(scores.mean()), float(math.sqrt(m * (1 - m) / (n + 2)))

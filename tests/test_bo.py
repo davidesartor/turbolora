@@ -59,7 +59,7 @@ def test_fit_gp_reads_trials():
 def test_search_defaults():
     args = bo.argument_parser().parse_args([])
     assert (args.seed, args.theta_range) == (0, None)
-    assert (args.n_baseline, args.n_sobol, args.n_evals, args.thompson_candidates) == (10, 10, 600, 2000)
+    assert (args.n_baseline, args.n_sobol, args.n_evals, args.thompson_candidates) == (8, 8, None, 2048)
 
 
 def quadratic(theta, trial):
@@ -193,7 +193,7 @@ def parse(*extra: str, out: str):
 def test_argument_parser_defaults():
     args = train_bo.argument_parser().parse_args(["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", "o"])
     assert (args.n_questions, args.k_rollouts) == (64, 4)
-    assert (args.n_evals, args.max_completion, args.rank, args.proj_dim) == (600, 1024, 2, 1)
+    assert (args.n_evals, args.max_completion, args.rank, args.proj_dim) == (None, 1024, 2, 1)
 
 
 def test_default_theta_range_is_grpo_max_displacement():
@@ -202,12 +202,25 @@ def test_default_theta_range_is_grpo_max_displacement():
     assert train_bo.max_grpo_displacement(65, rank=2, proj_dim=1) == pytest.approx(3e-3)
 
 
-def test_run_resolves_theta_range_from_dataset(stubbed, tmp_path):
+def test_grpo_steps():
+    assert train_bo.grpo_steps(640) == 30 and train_bo.grpo_steps(65) == 6
+
+
+def test_grpo_budget_trials():
+    # 3 · 640 · 4 completions: 7680 / (64·4) = 30 = GRPO steps; halving the per-trial sample doubles the trials
+    assert train_bo.grpo_budget_trials(640, 64, 4) == 30
+    assert train_bo.grpo_budget_trials(640, 32, 4) == 60
+    assert train_bo.grpo_budget_trials(65, 64, 4) == 4
+
+
+def test_run_resolves_theta_range_and_n_evals_from_dataset(stubbed, tmp_path):
     args = parse(out=str(tmp_path / "run"))
     args.theta_range = None
+    args.n_evals = None
     train_bo.run(args, FakeAdapter)
-    # 4 prompts -> 1 step/epoch -> 3 · 5e-4
+    # 4 prompts -> 1 step/epoch -> 3 · 5e-4; 3·4·4 = 48 completions / (3 questions · 2 rollouts) = 8 trials
     assert args.theta_range == pytest.approx(1.5e-3)
+    assert args.n_evals == 8
     assert json.loads((tmp_path / "run" / "run.json").read_text())["theta_range"] == pytest.approx(1.5e-3)
 
 

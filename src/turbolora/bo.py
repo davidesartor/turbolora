@@ -103,17 +103,22 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n-baseline",
         type=int,
-        default=10,
+        default=8,
         help="θ=0 replicates: a well-measured base point that also seeds the noise model",
     )
     parser.add_argument(
         "--n-sobol",
         type=int,
-        default=10,
+        default=8,
         help="quasi-random trials before the GP takes over",
     )
-    parser.add_argument("--n-evals", type=int, default=600, help="searched trials, on top of the θ=0 replicates")
-    parser.add_argument("--thompson-candidates", type=int, default=2000)
+    parser.add_argument(
+        "--n-evals",
+        type=int,
+        default=None,
+        help="searched trials, on top of the θ=0 replicates; None = objective-specific default",
+    )
+    parser.add_argument("--thompson-candidates", type=int, default=2048)
     return parser
 
 
@@ -129,8 +134,10 @@ def search(
     trials: list[dict] = (
         json.loads(trials_path.read_text()) if trials_path.exists() else []
     )
-    if args.theta_range is None:
-        raise ValueError("theta_range must be resolved by the caller before search")
+    if args.theta_range is None or args.n_evals is None:
+        raise ValueError(
+            "theta_range and n_evals must be resolved by the caller before search"
+        )
     bounds = torch.tensor(
         [[-args.theta_range] * dim, [args.theta_range] * dim], dtype=torch.float64
     )
@@ -188,4 +195,9 @@ def search(
         f"selected trial {chosen['trial']}: observed {chosen['value']:.4f}, posterior mean {means.max():.4f}, θ={chosen['theta']}; "
         f"θ=0 baseline {baseline.mean():.4f} ± {baseline_sem:.4f}"
     )
-    return dict(chosen, steps=len(trials), baseline=baseline.mean().item(), baseline_sem=baseline_sem.item())
+    return dict(
+        chosen,
+        steps=len(trials),
+        baseline=baseline.mean().item(),
+        baseline_sem=baseline_sem.item(),
+    )
