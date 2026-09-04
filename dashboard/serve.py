@@ -6,6 +6,7 @@ import hashlib
 import http.server
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -231,6 +232,97 @@ def checkpoint_rate(checkpoints: list[Path]) -> float | None:
     return span / 3600 / (step_of(checkpoints[-1]) - step_of(checkpoints[0]))
 
 
+GP_CACHE_DIR = Path(__file__).with_name(".gp-cache")
+GP_CACHE: dict[str, dict | None] = {}
+GP_PENDING: set[str] = set()
+GP_LOCK = threading.Lock()
+
+
+def fit_frames(trials: list[dict], design: int, lo: float, hi: float) -> dict | None:
+    """GP posterior mean/sd on a grid over the search box after GP-guided batch 1, 2, 4, ... and the last, i.e. the snapshot steps (1-2 dim searches only)."""
+    dim = len(trials[0]["theta"])
+    if dim > 2:
+        return None
+    import torch
+    from turbolora.bo import fit_gp
+
+    n = 200 if dim == 1 else 40
+    axis = torch.linspace(lo, hi, n, dtype=torch.float64)
+    grid = axis[:, None] if dim == 1 else torch.cartesian_prod(axis, axis)
+    rnd = lambda xs: [float(f"{v:.4g}") for v in xs.tolist()]
+    # a frame per snapshot: the trials through GP-guided batch 1, 2, 4, ..., and everything so far
+    batch_of = lambda t: t.get("batch", t["trial"])
+    last_step = batch_of(trials[-1]) + 1 - design
+    steps = sorted({s for s in (2**i for i in range(0, 20)) if s <= last_step} | {last_step})
+    frames = []
+    for step in steps:
+        head = [t for t in trials if batch_of(t) < design + step]
+        k = len(head)
+        if len({tuple(t["theta"]) for t in head}) < 2:
+            continue
+        gp = fit_gp(head)
+        with torch.no_grad():
+            post = gp.posterior(grid)
+            observed = gp.posterior(torch.tensor([t["theta"] for t in head], dtype=torch.float64)).mean.squeeze(-1)
+        frames.append(dict(step=step, k=k, mean=rnd(post.mean.squeeze(-1)), sd=rnd(post.variance.sqrt().squeeze(-1)), pick=int(observed.argmax())))
+    return dict(axis=rnd(axis), frames=frames) if frames else None
+
+
+def gp_frames(trials_path: Path, trials: list[dict], design: int, lo: float, hi: float, wait: bool = False) -> dict | None:
+    """Frames for this trials.json, from memory or the disk cache; otherwise fitted in a background thread (or inline when `wait`), the page reloads when they land."""
+    run_key = hashlib.md5(str(trials_path.resolve()).encode()).hexdigest()
+    key = f"{run_key}-{trials_path.stat().st_mtime_ns}"
+    cache_file = GP_CACHE_DIR / f"{key}.json"
+    with GP_LOCK:
+        if key in GP_CACHE:
+            return GP_CACHE[key]
+        if cache_file.exists():
+            GP_CACHE[key] = json.loads(cache_file.read_text())
+            return GP_CACHE[key]
+        if key in GP_PENDING:
+            return None
+        GP_PENDING.add(key)
+
+    def work():
+        try:
+            result = fit_frames(trials, design, lo, hi)
+        except Exception as e:
+            print(f"GP fit failed for {trials_path}: {e}", flush=True)
+            result = None
+        # a running search rewrites trials.json every batch: keep only the newest fit per run
+        GP_CACHE_DIR.mkdir(exist_ok=True)
+        for stale in GP_CACHE_DIR.glob(f"{run_key}-*.json"):
+            stale.unlink()
+        cache_file.write_text(json.dumps(result))
+        with GP_LOCK:
+            GP_CACHE[key] = result
+            GP_PENDING.discard(key)
+        return result
+
+    if wait:
+        return work()
+    threading.Thread(target=work, daemon=True).start()
+    return None
+
+
+def load_bo(run_dir: Path, summary: dict, wait_gp: bool = False) -> dict:
+    """Trial log of a BO search plus the GP posterior's evolution, for the run page's search plots."""
+    trials_path = run_dir / "trials.json"
+    if not trials_path.exists():
+        return {}
+    trials = json.loads(trials_path.read_text())
+    if not trials:
+        return {}
+    rng = summary.get("theta_range") or max(abs(x) for t in trials for x in t["theta"]) or 1.0
+    rows = [
+        dict(trial=t["trial"], batch=t.get("batch", t["trial"]), baseline=t["baseline"], theta=[float(f"{x:.4g}") for x in t["theta"]], value=float(f"{t['value']:.4g}"), sem=float(f"{t['sem']:.3g}"))
+        for t in trials
+    ]
+    # `design` counts batches; the final run.json drops it (8 θ=0 replicates + 8 Sobol by default)
+    design = summary.get("design", 16)
+    return dict(bo=dict(trials=rows, range=rng, design=design, gp=gp_frames(trials_path, trials, design, -rng, rng, wait_gp)))
+
+
 def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
     """Step count and, for runs still training, resources so far from the latest logged step (or BO batch)."""
     checkpoints = sorted(
@@ -282,7 +374,7 @@ def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
     return progress
 
 
-def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
+def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: bool = False) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
     for path in sorted(baselines_dir.glob("*/*.json.gz")):
@@ -332,6 +424,7 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         runs[str(rel)] = (
             summary
             | load_progress(run_dir, summary, curves)
+            | load_bo(run_dir, summary, wait_gp)
             | dict(tasks=tasks, curves=curves)
         )
 

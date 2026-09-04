@@ -19,6 +19,6 @@ if __name__ == "__main__":
     if args.slim_every:
         builds.append((args.out.with_name(f"{args.out.stem}-slim{args.out.suffix}"), args.slim_every))
     for out, every in builds:
-        payload = json.dumps(collect(args.baselines_dir, args.runs_dir, every)).replace("</", "<\\/")
+        payload = json.dumps(collect(args.baselines_dir, args.runs_dir, every, wait_gp=True)).replace("</", "<\\/")
         out.write_text(template.replace("/*__DATA__*/null", payload))
         print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")

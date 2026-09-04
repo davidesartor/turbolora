@@ -9,3 +9,4 @@ outputs/
 dashboard/dashboard.html
 dashboard/dashboard-slim.html
 tmp/
+dashboard/.gp-cache/
