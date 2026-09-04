@@ -159,6 +159,13 @@ def snapshots(run_dir: Path) -> list[Path]:
     )
 
 
+def last_full_eval(run_dir: Path) -> list[Path]:
+    """The newest snapshot evaluated on every task any snapshot of this run has (a running job writes evals one task at a time)."""
+    evaluated = {s: {p.name for p in s.glob("*.json.gz")} for s in snapshots(run_dir)}
+    full = set().union(*evaluated.values()) if evaluated else set()
+    return [s for s, done in evaluated.items() if done == full][-1:]
+
+
 def eval_curves(run_dir: Path) -> list[dict]:
     """One eval_<task> row per evaluated snapshot, in the same shape as the training rows."""
     rows = []
@@ -274,7 +281,7 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         models.setdefault(name, dict(hf_id=MODELS[name].hf_id, tasks={}))
         models[name]["tasks"][task] = load_task(path)
 
-    # a run is a training output dir with run.json and/or checkpoints; its last snapshot's eval is the headline accuracy
+    # a run is a training output dir with run.json and/or checkpoints; its latest fully evaluated snapshot is the headline accuracy
     run_dirs = {p.parent for p in runs_dir.glob("**/run.json")} | {
         p.parent.parent for p in runs_dir.glob("**/checkpoint-*/trainer_state.json")
     }
@@ -288,13 +295,15 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         )
         if summary.get("model") not in MODELS:
             continue
-        last = snapshots(run_dir)[-1:]
+        last = last_full_eval(run_dir)
         tasks = {
             p.name.removesuffix(".json.gz"): load_task(p)
             for snapshot in last
             for p in sorted(snapshot.glob("*.json.gz"))
             if p.name.removesuffix(".json.gz") in EVAL_TASKS
         }
+        if last:
+            summary = summary | dict(eval_step=int(last[0].name.split("-")[1]))
         curves = thin(load_curves(run_dir), curve_every)
         curves = sorted(
             curves + eval_curves(run_dir), key=lambda row: row.get("step", 0)
