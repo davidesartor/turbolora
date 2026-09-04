@@ -103,7 +103,10 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     model.requires_grad_(False)  # search only: no autograd graph anywhere
     print(f"{adapter.__name__}: {len(vs)} v's, θ ∈ ℝ^{dim}")
 
-    dataset = TASKS[args.task]("train")
+    # same prompt cut as the GRPO trainer: vLLM never truncates, and a prompt over the 1536-token context kills the job
+    dataset = TASKS[args.task]("train").filter(
+        lambda r: len(tokenizer(spec.prompt(r["question"])).input_ids) <= grpo.MAX_PROMPT_LENGTH
+    )
     candidate_dir = out / "candidate"
     if args.theta_range is None:
         args.theta_range = max_grpo_displacement(len(dataset), args.rank, args.proj_dim)
