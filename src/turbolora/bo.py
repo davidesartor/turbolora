@@ -1,4 +1,4 @@
-"""Gradient-free search: θ=0 replicates → Sobol → fixed-noise GP → Thompson sampling over a boxed vector, with a resumable trial log (after collaborators-poc)."""
+"""Gradient-free search: θ=0 replicates → Sobol → fixed-noise GP → batched Thompson sampling over a boxed vector, with a resumable trial log (after collaborators-poc)."""
 
 import argparse
 import json
@@ -19,8 +19,8 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from torch.quasirandom import SobolEngine
 
 Objective = Callable[
-    [Float[Tensor, "T"], int], tuple[float, float]
-]  # (θ, trial) -> (mean, SEM)
+    [Float[Tensor, "B T"], int], list[tuple[float, float]]
+]  # (θ batch, batch index) -> (mean, SEM) per row
 
 
 def fit_gp(trials: list[dict]) -> SingleTaskGP:
@@ -70,6 +70,12 @@ def argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="GP-guided trials, on top of the θ=0 replicates and the Sobol design; None = objective-specific default",
     )
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="θ's evaluated per objective call (one vLLM batch, one LoRA each); 1 = sequential",
+    )
     parser.add_argument("--thompson-candidates", type=int, default=2048)
     return parser
 
@@ -95,8 +101,10 @@ def search(
 ) -> dict | None:
     """Maximize `objective` over [-θ_range, θ_range]^dim, logging to `<out>/trials.json`; returns the evaluated trial with the best GP posterior mean.
 
-    Each trial's sem² is taken as its observation noise. Resumes from the log; a SIGUSR1/SIGTERM finishes the running
-    trial and returns None. `on_snapshot(step, pick)` fires after GP-guided trial 1, 2, 4, ... and the last (θ=0 replicates and Sobol design excluded) with the current pick.
+    Batches: the initial design (θ=0 replicates, then Sobol) in chunks of `batch`, then `n_evals` Thompson batches (one
+    posterior draw per row). Each trial's sem² is taken as its observation noise. Resumes from the log; a SIGUSR1/SIGTERM
+    finishes the running batch and returns None. `on_snapshot(step, pick)` fires after GP-guided batch 1, 2, 4, ... and
+    the last with the current pick.
     """
     trials_path = out / "trials.json"
     trials: list[dict] = (
@@ -109,45 +117,48 @@ def search(
     bounds = torch.tensor(
         [[-args.theta_range] * dim, [args.theta_range] * dim], dtype=torch.float64
     )
-    # a fixed sequence, so a resumed run continues it
+    # a fixed design, so a resumed run continues it
     sobol = SobolEngine(dim, scramble=True, seed=args.seed).draw(args.n_sobol).double()
     sobol = bounds[0] + (bounds[1] - bounds[0]) * sobol
+    design = torch.cat([torch.zeros(args.n_baseline, dim, dtype=torch.float64), sobol])
+    design_batches = [design[i : i + args.batch] for i in range(0, len(design), args.batch)]
+    n_batches = len(design_batches) + args.n_evals
 
-    # slurm preemption/wall-limit signal: finish the running trial, then leave the loop
+    # slurm preemption/wall-limit signal: finish the running batch, then leave the loop
     stop = argparse.Namespace(requested=False)
     for sig in (signal.SIGUSR1, signal.SIGTERM):
         signal.signal(sig, lambda *_: setattr(stop, "requested", True))
-    while len(trials) < args.n_baseline + args.n_sobol + args.n_evals and not stop.requested:
-        i = len(trials)
-        if i < args.n_baseline:
-            theta = torch.zeros(dim, dtype=torch.float64)
-        elif i - args.n_baseline < args.n_sobol:
-            theta = sobol[i - args.n_baseline]
+    # logs predating the batch axis were sequential: their trial index is their batch index
+    while (b := trials[-1].get("batch", trials[-1]["trial"]) + 1 if trials else 0) < n_batches and not stop.requested:
+        if b < len(design_batches):
+            thetas = design_batches[b]
         else:
-            # Thompson sampling: one posterior draw over uniform random candidates, take its argmax
+            # Thompson sampling: one posterior draw per row over uniform random candidates, each row's argmax is its θ
             gp = fit_gp(trials)
             candidates = bounds[0] + (bounds[1] - bounds[0]) * torch.rand(
                 args.thompson_candidates, dim, dtype=torch.float64
             )
             with torch.no_grad():
-                theta = candidates[gp.posterior(candidates).sample().argmax()]
-        value, sem = objective(theta, i)
-        trials.append(
-            dict(
-                trial=i,
-                baseline=i < args.n_baseline,
-                theta=theta.tolist(),
-                value=value,
-                sem=sem,
+                draws = gp.posterior(candidates).rsample(torch.Size([args.batch])).squeeze(-1)
+            thetas = candidates[draws.argmax(-1)]
+        results = objective(thetas, b)
+        for theta, (value, sem) in zip(thetas, results):
+            trials.append(
+                dict(
+                    trial=len(trials),
+                    batch=b,
+                    baseline=b < len(design_batches) and bool((theta == 0).all()),
+                    theta=theta.tolist(),
+                    value=value,
+                    sem=sem,
+                )
             )
-        )
         trials_path.write_text(json.dumps(trials, indent=1))
         best = max(t["value"] for t in trials)
-        print(
-            f"trial {i}: {value:.4f} ± {sem:.4f} (best {best:.4f}) θ={[round(x, 4) for x in theta.tolist()]}"
-        )
-        # snapshot steps count GP-guided trials only: the θ=0 replicates and the Sobol design are the initial design
-        step = len(trials) - args.n_baseline - args.n_sobol
+        batch_best = max(v for v, _ in results)
+        print(f"batch {b}: best {batch_best:.4f} over {len(results)} θ's (best so far {best:.4f})")
+        # snapshot steps count GP-guided batches only: the θ=0 replicates and the Sobol design are the initial design
+        step = b + 1 - len(design_batches)
         if on_snapshot and step >= 1 and (not step & (step - 1) or step == args.n_evals):
             on_snapshot(step, pick(trials)[0])
     if stop.requested:
