@@ -195,17 +195,16 @@ def thin(curves: list[dict], every: int) -> list[dict]:
 
 
 def parse_run_path(rel: Path) -> dict:
-    """Config from <model>/<task>/<adapter>-<loss>-lr<lr>[-<cfg>]/seed<N> for runs started before run.json was written at train start."""
+    """Config from <model>/<task>/<adapter>-<loss>[-lr<lr>][-<cfg>]/seed<N> for runs that have not written run.json yet (BO writes it last)."""
     m = re.search(
-        r"(?:^|/)([^/]+)/([^/]+)/([^/-]+)-([^/-]+)-lr(\d[\d.]*(?:e[+-]?\d+)?)(?:-[^/]+)?/seed(\d+)$",
+        r"(?:^|/)([^/]+)/([^/]+)/([^/-]+)-([^/-]+)(?:-lr(\d[\d.]*(?:e[+-]?\d+)?))?(?:-[^/]+)?/seed(\d+)$",
         str(rel),
     )
     if not m:
         return {}
     model, task, adapter, loss, lr, seed = m.groups()
-    return dict(
-        model=model, task=task, adapter=adapter, loss=loss, lr=float(lr), seed=int(seed)
-    )
+    config = dict(model=model, task=task, adapter=adapter, loss=loss, seed=int(seed))
+    return config | dict(lr=float(lr)) if lr else config
 
 
 def hours_per_step(curves: list[dict]) -> float | None:
@@ -233,7 +232,7 @@ def checkpoint_rate(checkpoints: list[Path]) -> float | None:
 
 
 def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
-    """Step count and, for runs still training, resources so far from the latest logged step."""
+    """Step count and, for runs still training, resources so far from the latest logged step (or BO batch)."""
     checkpoints = sorted(
         run_dir.glob("checkpoint-*/trainer_state.json"),
         key=lambda p: int(p.parent.name.split("-")[1]),
@@ -253,6 +252,18 @@ def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
             ]
             if src in last
         }
+    # a BO search logs batches to trials.json instead of checkpoints; its GP-guided batches are the steps
+    trials_path = run_dir / "trials.json"
+    if status == "running" and not checkpoints and trials_path.exists() and "design" in summary:
+        trials = json.loads(trials_path.read_text())
+        batches = trials[-1]["batch"] + 1 if trials else 0
+        step = max(0, batches - summary["design"])
+        started, last = (run_dir / "run.json").stat().st_mtime, trials_path.stat().st_mtime
+        idle_hours = (time.time() - last) / 3600
+        rate = (last - started) / 3600 / batches if batches else None
+        progress |= dict(step=step, checkpoint_time=round(last), idle_hours=round(idle_hours, 3))
+        if rate and idle_hours < max(2 * rate, 0.5):
+            progress |= dict(eta_time=round(time.time() + 3600 * rate * (summary["max_steps"] - step)))
     # a queued or preempted job keeps its checkpoints but stops advancing, so ETA needs both a rate and proof of life
     if status == "running" and checkpoints:
         newest = checkpoints[-1]
@@ -282,9 +293,11 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         models[name]["tasks"][task] = load_task(path)
 
     # a run is a training output dir with run.json and/or checkpoints; its latest fully evaluated snapshot is the headline accuracy
-    run_dirs = {p.parent for p in runs_dir.glob("**/run.json")} | {
-        p.parent.parent for p in runs_dir.glob("**/checkpoint-*/trainer_state.json")
-    }
+    run_dirs = (
+        {p.parent for p in runs_dir.glob("**/run.json")}
+        | {p.parent.parent for p in runs_dir.glob("**/checkpoint-*/trainer_state.json")}
+        | {p.parent.parent for p in runs_dir.glob("**/snapshots/step-*")}
+    )
     runs = {}
     for run_dir in sorted(run_dirs):
         rel = run_dir.relative_to(runs_dir)
@@ -295,6 +308,14 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1) -> dict:
         )
         if summary.get("model") not in MODELS:
             continue
+        # the same adapter searched by BO is its own family on the plot, not a TinyLoRA-GRPO point
+        if summary.get("loss") == "bo":
+            summary = summary | dict(adapter=f"{summary['adapter']}-bo")
+        # a BO search writes run.json only at the end; until then its θ vector length is the parameter count
+        if "params" not in summary and (run_dir / "trials.json").exists():
+            trials = json.loads((run_dir / "trials.json").read_text())
+            if trials:
+                summary = summary | dict(params=len(trials[0]["theta"]))
         last = last_full_eval(run_dir)
         tasks = {
             p.name.removesuffix(".json.gz"): load_task(p)

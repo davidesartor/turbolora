@@ -237,10 +237,11 @@ $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("butto
 window.addEventListener("hashchange", render);
 
 // ---- the chart
-const ADAPTER = { tinylora: "TinyLoRA", loraxs: "LoRA-XS", lora: "LoRA", full: "full FT" };
+const ADAPTER = { tinylora: "TinyLoRA", "tinylora-bo": "TinyLoRA BO", loraxs: "LoRA-XS", lora: "LoRA", full: "full FT" };
 // colour carries the series, shape carries the adapter: the families overlap in parameter count so position alone cannot separate them
 const MARK = {
   tinylora: (x, y, r) => `<polygon points="${x},${y - r * 1.3} ${x + r * 1.3},${y} ${x},${y + r * 1.3} ${x - r * 1.3},${y}"`,
+  "tinylora-bo": (x, y, r) => `<polygon points="${x},${y - r * 1.5} ${x + r * 0.45},${y - r * 0.45} ${x + r * 1.5},${y} ${x + r * 0.45},${y + r * 0.45} ${x},${y + r * 1.5} ${x - r * 0.45},${y + r * 0.45} ${x - r * 1.5},${y} ${x - r * 0.45},${y - r * 0.45}"`,
   loraxs: (x, y, r) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}"`,
   lora: (x, y, r) => `<circle cx="${x}" cy="${y}" r="${r}"`,
   full: (x, y, r) => `<polygon points="${x},${y - r * 1.4} ${x + r * 1.3},${y + r} ${x - r * 1.3},${y + r}"`,
