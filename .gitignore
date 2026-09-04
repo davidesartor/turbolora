@@ -8,3 +8,4 @@ outputs/
 .unsloth-cache/
 dashboard/dashboard.html
 dashboard/dashboard-slim.html
+tmp/

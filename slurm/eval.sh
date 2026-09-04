@@ -14,5 +14,9 @@ set -e
 cd "${SLURM_SUBMIT_DIR:?}"
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
+# job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
+export UNSLOTH_COMPILE_LOCATION=/tmp/unsloth-cache
+export TRITON_CACHE_DIR=/tmp/triton
+export VLLM_CACHE_ROOT=/tmp/vllm
 
 "$HOME/.local/bin/uv" run -m turbolora.eval --adapters ${ADAPTERS:?} --tasks ${TASKS:-gsm8k} ${SHOW:+--show $SHOW} --tp "${TP:-1}" --skip-existing
