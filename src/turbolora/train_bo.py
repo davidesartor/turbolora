@@ -1,8 +1,9 @@
-"""BO training of TinyLoRA: θ = every v concatenated (one global v unless --untie), each trial scored by vLLM pass rate on a random train subset."""
+"""BO training of TinyLoRA: θ = every v concatenated (one global v unless --untie), each trial scored by the logit vLLM pass rate on a random train subset."""
 
 import argparse
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import unsloth  # noqa: F401  must import before peft/transformers
 
 import numpy as np
 import torch
+from scipy.special import digamma, polygamma
 from jaxtyping import Float
 from torch import Tensor
 from torch.nn.utils import vector_to_parameters
@@ -37,6 +39,13 @@ def argument_parser() -> argparse.ArgumentParser:
     # objective: mean per-question pass rate on a fresh random train subset each trial (one GRPO step of samples by default)
     parser.add_argument("--n-questions", type=int, default=grpo.PROMPTS_PER_STEP)
     parser.add_argument("--k-rollouts", type=int, default=grpo.ROLLOUTS_PER_PROMPT)
+    parser.add_argument("--no-eval", action="store_true", help="snapshot the pick only, skip its evals")
+    parser.add_argument(
+        "--eval-tasks",
+        nargs="+",
+        choices=TASKS,
+        default=grpo.argument_parser().get_default("eval_tasks"),
+    )
     return parser
 
 
@@ -47,7 +56,7 @@ def grpo_steps(n_prompts: int) -> int:
 
 
 def grpo_budget_trials(n_prompts: int, n_questions: int, k_rollouts: int) -> int:
-    """Trials that sample as many completions as train_tinylora's default schedule."""
+    """GP-guided trials that sample as many completions as train_tinylora's default schedule (initial design not counted)."""
     epochs = grpo.argument_parser().get_default("epochs")
     completions = epochs * n_prompts * grpo.ROLLOUTS_PER_PROMPT
     return math.ceil(completions / (n_questions * k_rollouts))
@@ -81,6 +90,14 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         p for p in model.parameters() if p.requires_grad
     ]  # the distinct v's, module order
     dim = sum(v.numel() for v in vs)
+    snapshot = grpo.Snapshot(
+        model,
+        adapter,
+        spec,
+        [] if args.no_eval else args.eval_tasks,
+        args.max_completion,
+        out / "snapshots",
+    )
     model.requires_grad_(False)  # search only: no autograd graph anywhere
     print(f"{adapter.__name__}: {len(vs)} v's, θ ∈ ℝ^{dim}")
 
@@ -94,7 +111,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         print(f"n_evals {args.n_evals} (GRPO completion budget)")
 
     def objective(theta: Float[Tensor, "T"], trial: int) -> tuple[float, float]:
-        """Mean over questions of the K-rollout pass rate; SEM across questions, floored."""
+        """Logit of the K-rollout pass rate over questions, with its posterior std."""
         rng = np.random.default_rng(args.seed + trial)
         batch = dataset.select(
             rng.choice(len(dataset), args.n_questions, replace=False)
@@ -120,11 +137,23 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         ]
         scores = np.array(scores)
 
-        # noise from the Beta(½,½) posterior on the pass rate: never 0, even when every question scores the same
-        n, m = len(scores), (scores.sum() + 0.5) / (len(scores) + 1)
-        return float(scores.mean()), float(math.sqrt(m * (1 - m) / (n + 2)))
+        # Jeffreys Beta(½,½) posterior on the pass rate, reported to the GP as its exact moment-matched Gaussian in logit space:
+        # logit(X) has cumulants ψ(a)−ψ(b), ψ₁(a)+ψ₁(b) (mean/variance exact; shape is skewed while a shape stays <1)
+        a, b = 0.5 + scores.sum(), 0.5 + len(scores) - scores.sum()
+        return float(digamma(a) - digamma(b)), float(math.sqrt(polygamma(1, a) + polygamma(1, b)))
 
-    chosen = bo.search(args, objective, dim, args.n_questions, out)
+    last_snapshot: dict = {}
+
+    def on_snapshot(step: int, current: dict) -> None:
+        """Snapshot+eval the GP's current pick at GP-guided trial 1, 2, 4, ...; an unchanged pick just copies the previous snapshot."""
+        last = step == args.n_evals
+        if last_snapshot.get("theta") == current["theta"] and not last:
+            shutil.copytree(last_snapshot["dir"], out / "snapshots" / f"step-{step:06d}", dirs_exist_ok=True)
+            return
+        vector_to_parameters(torch.tensor(current["theta"]).to(vs[0]), vs)
+        last_snapshot.update(theta=current["theta"], dir=snapshot.save_and_eval(step, last))
+
+    chosen = bo.search(args, objective, dim, out, on_snapshot)
     if chosen is None:
         return
 
@@ -148,8 +177,10 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         params=dim,
         theta=chosen["theta"],
         theta_range=args.theta_range,
-        baseline=chosen["baseline"],
-        baseline_sem=chosen["baseline_sem"],
+        # search values are logit pass rates; report the θ=0 baseline back on the accuracy scale
+        baseline=torch.sigmoid(torch.tensor(chosen["baseline"])).item(),
+        baseline_logit=chosen["baseline"],
+        baseline_logit_sem=chosen["baseline_sem"],
         train_hours=round((time.time() - start) / 3600, 3),
         peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
         gpu=torch.cuda.get_device_name(0),

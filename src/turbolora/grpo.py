@@ -75,6 +75,7 @@ class Snapshot(TrainerCallback):
         root: Path,
     ):
         self.model, self.adapter, self.spec, self.root = model, adapter, spec, root
+        self.trainable = [n for n, p in model.named_parameters() if p.requires_grad]
         self.datasets = {task: TASKS[task]("test") for task in tasks}
         self.sampling = SamplingParams(
             temperature=0.0, max_tokens=max_tokens, stop=list(spec.prompt.stop)
@@ -84,15 +85,16 @@ class Snapshot(TrainerCallback):
         step = state.global_step
         if step & (step - 1) and step != state.max_steps:  # not a power of two
             return
+        self.save_and_eval(step, last=step == state.max_steps)
+
+    def save_and_eval(self, step: int, last: bool) -> Path:
+        """Write snapshots/step-N (trainable tensors, PEFT export if `last`) and eval it on every task."""
         out_dir = self.root / f"step-{step:06d}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        trainable = {
-            name: p.detach().cpu().contiguous()
-            for name, p in self.model.named_parameters()
-            if p.requires_grad
-        }
+        params = dict(self.model.named_parameters())
+        trainable = {n: params[n].detach().cpu().contiguous() for n in self.trainable}
         save_file(trainable, out_dir / "trainable.safetensors")
-        if step == state.max_steps:
+        if last:
             self.adapter.export(self.model, str(out_dir))
         # same call the rollout path uses: a LoRARequest built from the live state_dict
         request = self.model.load_lora("eval_lora", load_tensors=True)
@@ -109,6 +111,7 @@ class Snapshot(TrainerCallback):
                 f"[step {step} {task}] accuracy: {stats['accuracy']:.4f} ({stats['n_correct']}/{stats['n']})"
             )
             write_result(out_dir, task, stats, records, step=step)
+        return out_dir
 
 
 class CurveLogger(TrainerCallback):

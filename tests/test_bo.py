@@ -18,6 +18,7 @@ vllm.__spec__ = importlib.machinery.ModuleSpec("vllm", None)
 
 class FakeSamplingParams:
     def __init__(self, **kwargs):
+        self.n = 1
         self.__dict__.update(kwargs)
 
 
@@ -32,12 +33,12 @@ from turbolora.models import MODELS  # noqa: E402
 SMALL = ["--theta-range", "0.1", "--n-baseline", "2", "--n-sobol", "2", "--n-evals", "4", "--thompson-candidates", "50"]
 
 
-def test_heteroskedastic_gp_denoises_toward_the_optimum():
+def test_fixed_noise_gp_denoises_toward_the_optimum():
     torch.manual_seed(0)
     X = torch.linspace(-0.1, 0.1, 25, dtype=torch.float64)[:, None]
     truth = 0.8 - 20 * (X - 0.03) ** 2
     Y = truth + 0.02 * torch.randn_like(truth)
-    gp = bo.HeteroskedasticGP(X, Y, torch.full_like(Y, 0.02**2), n_samples=32)
+    gp = bo.fit_gp([dict(theta=x.tolist(), value=y.item(), sem=0.02) for x, y in zip(X, Y)])
 
     grid = torch.linspace(-0.1, 0.1, 201, dtype=torch.float64)[:, None]
     with torch.no_grad():
@@ -50,7 +51,7 @@ def test_heteroskedastic_gp_denoises_toward_the_optimum():
 
 def test_fit_gp_reads_trials():
     trials = [dict(theta=[x, -x], value=0.5 + x, sem=0.02) for x in torch.linspace(-0.1, 0.1, 8).tolist()]
-    gp = bo.fit_gp(trials, n_samples=32)
+    gp = bo.fit_gp(trials)
     with torch.no_grad():
         mean = gp.posterior(torch.tensor([[0.1, -0.1], [-0.1, 0.1]], dtype=torch.float64)).mean
     assert mean[0] > mean[1]
@@ -70,15 +71,15 @@ def quadratic(theta, trial):
 def test_search_baseline_sobol_thompson_then_best_posterior(tmp_path):
     seen = []
     args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
-    chosen = bo.search(args, lambda t, i: seen.append((t.tolist(), i)) or quadratic(t, i), dim=2, n_samples=32, out=tmp_path)
+    chosen = bo.search(args, lambda t, i: seen.append((t.tolist(), i)) or quadratic(t, i), dim=2, out=tmp_path)
 
     trials = json.loads((tmp_path / "trials.json").read_text())
     assert [(t["theta"], t["trial"]) for t in trials] == seen
-    assert [t["baseline"] for t in trials] == [True] * 2 + [False] * 8
+    assert [t["baseline"] for t in trials] == [True] * 2 + [False] * 10
     assert all(t["theta"] == [0.0, 0.0] for t in trials[:2])
     assert all(-0.1 <= x <= 0.1 for t in trials[2:] for x in t["theta"])
     assert trials[2]["theta"] != trials[3]["theta"]
-    assert chosen is not None and chosen["steps"] == 10
+    assert chosen is not None and chosen["steps"] == 12
     baseline = torch.tensor([t["value"] for t in trials[:2]])
     assert chosen["baseline"] == pytest.approx(baseline.mean().item())
     assert chosen["baseline_sem"] == pytest.approx(baseline.std().item() / 2**0.5)
@@ -89,7 +90,7 @@ def test_search_can_return_theta_zero(tmp_path):
     # every searched point scores below the θ=0 replicates: the honest pick is no adapter at all
     args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
     objective = lambda theta, trial: (1.0 - 10 * theta.abs().sum().item(), 0.02)
-    chosen = bo.search(args, objective, 2, 32, tmp_path)
+    chosen = bo.search(args, objective, 2, tmp_path)
     assert chosen is not None and chosen["theta"] == [0.0, 0.0] and chosen["baseline"]
 
 
@@ -101,10 +102,10 @@ def test_search_resumes_from_trials_json(tmp_path):
     ]
     (tmp_path / "trials.json").write_text(json.dumps(done))
     seen = []
-    bo.search(bo.argument_parser().parse_args(SMALL), lambda t, i: seen.append(i) or quadratic(t, i), 2, 32, tmp_path)
+    bo.search(bo.argument_parser().parse_args(SMALL), lambda t, i: seen.append(i) or quadratic(t, i), 2, tmp_path)
     trials = json.loads((tmp_path / "trials.json").read_text())
-    assert trials[:3] == done and len(trials) == 6
-    assert seen == [3, 4, 5]
+    assert trials[:3] == done and len(trials) == 8
+    assert seen == [3, 4, 5, 6, 7]
 
 
 def test_search_stops_after_current_trial_on_signal(tmp_path):
@@ -113,7 +114,7 @@ def test_search_stops_after_current_trial_on_signal(tmp_path):
             os.kill(os.getpid(), signal.SIGUSR1)
         return quadratic(theta, trial)
 
-    assert bo.search(bo.argument_parser().parse_args(SMALL), objective, 2, 32, tmp_path) is None
+    assert bo.search(bo.argument_parser().parse_args(SMALL), objective, 2, tmp_path) is None
     assert len(json.loads((tmp_path / "trials.json").read_text())) == 2
 
 
@@ -186,7 +187,7 @@ def stubbed(monkeypatch, tmp_path):
 
 
 def parse(*extra: str, out: str):
-    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--n-questions", "3", "--k-rollouts", "2"]
+    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--n-questions", "3", "--k-rollouts", "2", "--eval-tasks", "gsm8k"]
     return train_bo.argument_parser().parse_args([*base, *SMALL, *extra])
 
 
@@ -237,19 +238,32 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert loads["gpu_memory_utilization"] == 0.45
     assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0)  # default: one global v
 
-    # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per trial, no export
+    # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per generation, no export
     trials = json.loads((out / "trials.json").read_text())
-    assert len(trials) == 6
-    assert torch.allclose(torch.tensor([c["theta"] for c in model.calls]), torch.tensor([t["theta"] for t in trials]))
+    assert len(trials) == 8
+    rollouts = [c for c in model.calls if c["sampling"].n == 2]
+    assert torch.allclose(torch.tensor([c["theta"] for c in rollouts]), torch.tensor([t["theta"] for t in trials]))
     assert model.v.dtype == torch.float32
-    assert [c["lora_id"] for c in model.calls] == [1, 2, 3, 4, 5, 6]
-    assert [e["dir"] for e in FakeAdapter.exports] == [str(out / "final_adapter")]
+    ids = [c["lora_id"] for c in model.calls]
+    assert ids == sorted(ids) and len(set(ids)) == len(ids)
     assert all(t["sem"] > 0 for t in trials)  # Beta posterior noise, no floor needed
 
     # objective: n questions x K rollouts, raw-text prompts with the model's stop strings
-    assert all(len(c["prompts"]) == 3 and c["sampling"].n == 2 for c in model.calls)
-    assert model.calls[0]["sampling"].stop == list(spec.prompt.stop)
-    assert all(p.startswith("<|im_start|>system") for p in model.calls[0]["prompts"])
+    assert all(len(c["prompts"]) == 3 for c in rollouts)
+    assert rollouts[0]["sampling"].stop == list(spec.prompt.stop)
+    assert all(p.startswith("<|im_start|>system") for p in rollouts[0]["prompts"])
+
+    # snapshots of the GP's pick after GP-guided trials 1, 2 and 4 (the last; 2 baseline + 2 Sobol are the initial design); export only at the last
+    snapshots = sorted(d.name for d in (out / "snapshots").iterdir())
+    assert snapshots == ["step-000001", "step-000002", "step-000004"]
+    evals = [c for c in model.calls if c["sampling"].temperature == 0.0]
+    assert all(len(c["prompts"]) == len(DATASET) for c in evals)
+    assert 1 <= len(evals) <= 3  # an unchanged pick copies the previous snapshot instead of re-evaluating
+    for name in snapshots:
+        assert (out / "snapshots" / name / "trainable.safetensors").exists()
+        assert json.loads((out / "snapshots" / name / "eval.json").read_text())["gsm8k"]["n"] == len(DATASET)
+    assert (out / "snapshots" / "step-000004" / "adapter_config.json").exists()
+    assert [e["dir"] for e in FakeAdapter.exports] == [str(out / "snapshots" / "step-000004"), str(out / "final_adapter")]
 
     # export: final_adapter written from the chosen θ, run.json for the dashboard
     summary = json.loads((out / "run.json").read_text())
@@ -257,8 +271,8 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert FakeAdapter.exports[-1]["dir"] == str(out / "final_adapter")
     assert torch.allclose(torch.tensor(FakeAdapter.exports[-1]["theta"]), torch.tensor(summary["theta"]))
     assert (out / "final_adapter" / "tokenizer.json").exists()
-    assert (summary["adapter"], summary["loss"], summary["steps"], summary["params"], summary["gpu"]) == ("fakeadapter", "bo", 6, 2, "FakeGPU")
-    assert {"baseline", "baseline_sem"} <= summary.keys()
+    assert (summary["adapter"], summary["loss"], summary["steps"], summary["params"], summary["gpu"]) == ("fakeadapter", "bo", 8, 2, "FakeGPU")
+    assert {"baseline", "baseline_logit", "baseline_logit_sem"} <= summary.keys() and 0 < summary["baseline"] < 1
     assert (summary["rank"], summary["proj_dim"], summary["tie"], summary["peak_vram_gb"]) == (2, 1, 0, 3.0)
 
 
