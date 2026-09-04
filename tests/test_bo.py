@@ -30,7 +30,7 @@ from turbolora import bo, train_bo  # noqa: E402
 from turbolora.adapters import TinyLoRA  # noqa: E402
 from turbolora.models import MODELS  # noqa: E402
 
-SMALL = ["--theta-range", "0.1", "--n-baseline", "2", "--n-sobol", "2", "--n-evals", "4", "--thompson-candidates", "50"]
+SMALL = ["--theta-range", "0.1", "--batch", "1", "--n-baseline", "2", "--n-sobol", "2", "--n-evals", "4", "--thompson-candidates", "50"]
 
 
 def test_fixed_noise_gp_denoises_toward_the_optimum():
@@ -63,15 +63,15 @@ def test_search_defaults():
     assert (args.n_baseline, args.n_sobol, args.n_evals, args.thompson_candidates) == (8, 8, None, 2048)
 
 
-def quadratic(theta, trial):
-    """Peak at (0.05, -0.05); signal ≫ noise so the GP's pick is the best observed."""
-    return 1.0 - 100 * ((theta - torch.tensor([0.05, -0.05])) ** 2).sum().item(), 0.01
+def quadratic(thetas, batch):
+    """Peak at (0.05, -0.05); signal ≫ noise so the GP's pick is the best observed. One (value, sem) per row of the batch."""
+    return [(1.0 - 100 * ((theta - torch.tensor([0.05, -0.05])) ** 2).sum().item(), 0.01) for theta in thetas]
 
 
 def test_search_baseline_sobol_thompson_then_best_posterior(tmp_path):
     seen = []
     args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
-    chosen = bo.search(args, lambda t, i: seen.append((t.tolist(), i)) or quadratic(t, i), dim=2, out=tmp_path)
+    chosen = bo.search(args, lambda t, b: seen.extend((row, b) for row in t.tolist()) or quadratic(t, b), dim=2, out=tmp_path)
 
     trials = json.loads((tmp_path / "trials.json").read_text())
     assert [(t["theta"], t["trial"]) for t in trials] == seen
@@ -89,7 +89,7 @@ def test_search_baseline_sobol_thompson_then_best_posterior(tmp_path):
 def test_search_can_return_theta_zero(tmp_path):
     # every searched point scores below the θ=0 replicates: the honest pick is no adapter at all
     args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
-    objective = lambda theta, trial: (1.0 - 10 * theta.abs().sum().item(), 0.02)
+    objective = lambda thetas, batch: [(1.0 - 10 * theta.abs().sum().item(), 0.02) for theta in thetas]
     chosen = bo.search(args, objective, 2, tmp_path)
     assert chosen is not None and chosen["theta"] == [0.0, 0.0] and chosen["baseline"]
 
@@ -109,10 +109,10 @@ def test_search_resumes_from_trials_json(tmp_path):
 
 
 def test_search_stops_after_current_trial_on_signal(tmp_path):
-    def objective(theta, trial):
-        if trial == 1:
+    def objective(thetas, batch):
+        if batch == 1:
             os.kill(os.getpid(), signal.SIGUSR1)
-        return quadratic(theta, trial)
+        return quadratic(thetas, batch)
 
     assert bo.search(bo.argument_parser().parse_args(SMALL), objective, 2, tmp_path) is None
     assert len(json.loads((tmp_path / "trials.json").read_text())) == 2
@@ -129,15 +129,18 @@ class FakeModel(torch.nn.Module):
         self.linear = torch.nn.Linear(3, 5, bias=False)
         self.v = torch.nn.Parameter(torch.zeros(2))
         self.calls: list[dict] = []
-        self.next_lora_id = 1
+        self.loras: dict[int, list[float]] = {}
 
     def load_lora(self, save_directory, load_tensors=False):
         assert load_tensors  # from the live state_dict, as grpo.Snapshot does
-        self.next_lora_id += 1
-        return types.SimpleNamespace(id=self.next_lora_id - 1, path=save_directory)
+        lora_id = len(self.loras) + 1
+        self.loras[lora_id] = self.v.tolist()
+        return types.SimpleNamespace(id=lora_id, path=save_directory)
 
     def fast_generate(self, prompts, sampling_params, lora_request, use_tqdm):
-        self.calls.append(dict(prompts=prompts, sampling=sampling_params, lora_id=lora_request.id, theta=self.v.tolist()))
+        requests = lora_request if isinstance(lora_request, list) else [lora_request] * len(prompts)
+        assert len(requests) == len(prompts)
+        self.calls.append(dict(prompts=prompts, sampling=sampling_params, lora_ids=[r.id for r in requests]))
         # a rollout is right iff the question is one of the "2" ones -> per-question pass rate 0 or 1
         return [
             types.SimpleNamespace(outputs=[types.SimpleNamespace(text=f"\\boxed{{{2 if '2?' in p else 0}}}")] * sampling_params.n)
@@ -242,9 +245,10 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     trials = json.loads((out / "trials.json").read_text())
     assert len(trials) == 8
     rollouts = [c for c in model.calls if c["sampling"].n == 2]
-    assert torch.allclose(torch.tensor([c["theta"] for c in rollouts]), torch.tensor([t["theta"] for t in trials]))
+    assert all(len(set(c["lora_ids"])) == 1 for c in rollouts)  # batch 1: one LoRA serves every prompt of the call
+    assert torch.allclose(torch.tensor([model.loras[c["lora_ids"][0]] for c in rollouts]), torch.tensor([t["theta"] for t in trials]))
     assert model.v.dtype == torch.float32
-    ids = [c["lora_id"] for c in model.calls]
+    ids = [c["lora_ids"][0] for c in model.calls]
     assert ids == sorted(ids) and len(set(ids)) == len(ids)
     assert all(t["sem"] > 0 for t in trials)  # Beta posterior noise, no floor needed
 
@@ -291,7 +295,10 @@ def test_run_skips_export_when_search_is_interrupted(stubbed, tmp_path, monkeypa
     out = tmp_path / "run"
     monkeypatch.setattr(bo, "search", lambda *a, **k: None)
     train_bo.run(parse(out=str(out)), FakeAdapter)
-    assert not (out / "run.json").exists() and not (out / "final_adapter").exists()
+    # the config half of run.json is out for the dashboard, the summary half is not
+    config = json.loads((out / "run.json").read_text())
+    assert "steps" not in config and config["max_steps"] == 4 and config["design"] == 4
+    assert not (out / "final_adapter").exists()
 
 
 def test_main_parses_adapter_args(monkeypatch):

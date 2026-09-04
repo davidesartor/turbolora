@@ -61,7 +61,7 @@ def test_counts_pools_repeated_thetas():
 
 def test_search_defaults():
     args = puny_lora.argument_parser().parse_args([])
-    assert (args.seed, args.theta_range, args.batch) == (0, None, 16)
+    assert (args.seed, args.theta_range, args.batch) == (0, None, 1)
     assert (args.n_baseline, args.n_sobol, args.n_evals, args.thompson_candidates) == (16, 16, None, 2048)
 
 
@@ -192,13 +192,13 @@ def stubbed(monkeypatch, tmp_path):
 
 
 def parse(*extra: str, out: str):
-    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--n-questions", "2", "--k-rollouts", "1", "--eval-tasks", "gsm8k"]
+    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--n-questions", "8", "--k-rollouts", "1", "--eval-tasks", "gsm8k"]
     return train_punylora.argument_parser().parse_args([*base, *SMALL, *extra])
 
 
 def test_argument_parser_defaults():
     args = train_punylora.argument_parser().parse_args(["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", "o"])
-    assert (args.n_questions, args.k_rollouts, args.batch, args.vllm_share) == (16, 1, 16, 0.85)
+    assert (args.n_questions, args.k_rollouts, args.batch, args.vllm_share) == (16, 1, 1, 0.85)
     assert (args.n_evals, args.theta_range, args.max_completion, args.rank, args.proj_dim) == (None, None, 1024, 2, 1)
 
 
@@ -207,7 +207,7 @@ def test_run_resolves_theta_range_and_n_evals_from_dataset(stubbed, tmp_path):
     args.theta_range = None
     args.n_evals = None
     train_punylora.run(args, FakeAdapter)
-    # 4 prompts -> 1 step/epoch -> 3 · 5e-4; 3·4·4 = 48 completions / (4 θ · 2 questions · 1 rollout) = 6 batches
+    # 4 prompts -> 1 step/epoch -> 3 · 5e-4; 3·4·4 = 48 completions / (8 questions per call · 1 rollout) = 6 batches
     assert args.theta_range == pytest.approx(1.5e-3)
     assert args.n_evals == 6
     assert json.loads((tmp_path / "run" / "run.json").read_text())["steps"] == 6
@@ -262,7 +262,10 @@ def test_run_skips_export_when_search_is_interrupted(stubbed, tmp_path, monkeypa
     out = tmp_path / "run"
     monkeypatch.setattr(puny_lora, "search", lambda *a, **k: None)
     train_punylora.run(parse(out=str(out)), FakeAdapter)
-    assert not (out / "run.json").exists() and not (out / "final_adapter").exists()
+    # the config half of run.json is out for the dashboard, the summary half is not
+    config = json.loads((out / "run.json").read_text())
+    assert "steps" not in config and config["max_steps"] == 4 and config["design"] == 2
+    assert not (out / "final_adapter").exists()
 
 
 def test_main_parses_adapter_args(monkeypatch):

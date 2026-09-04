@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import shutil
 import time
 from pathlib import Path
@@ -73,6 +74,24 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     if args.n_evals is None:
         args.n_evals = grpo_budget_trials(len(dataset), args.n_questions, args.k_rollouts)
         print(f"n_evals {args.n_evals} batches (GRPO completion budget)")
+
+    # config half of run.json goes out before the search so the dashboard can show the run while it runs
+    config = dict(
+        model=args.model,
+        task=args.task,
+        adapter=adapter.__name__.lower(),
+        loss="puny_lora",
+        rank=args.rank,
+        proj_dim=args.proj_dim,
+        tie=1 if args.untie else 0,
+        seed=args.seed,
+        params=dim,
+        theta_range=args.theta_range,
+        max_steps=args.n_evals,
+        design=math.ceil((args.n_baseline + args.n_sobol) / args.batch),  # batches before the GP-guided ones
+        gpu=torch.cuda.get_device_name(0),
+    )
+    (out / "run.json").write_text(json.dumps(config, indent=1))
     if args.n_questions % args.batch:
         raise ValueError("n_questions must be a multiple of batch")
     questions_per_theta = args.n_questions // args.batch
@@ -127,25 +146,14 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     print(f"saved adapter to {adapter_dir}")
 
     # resource summary the dashboard plots accuracy against (same keys as grpo.run)
-    summary = dict(
-        model=args.model,
-        task=args.task,
-        adapter=adapter.__name__.lower(),
-        loss="puny_lora",
-        rank=args.rank,
-        proj_dim=args.proj_dim,
-        tie=1 if args.untie else 0,
-        seed=args.seed,
+    summary = config | dict(
         steps=chosen["steps"],
-        params=dim,
         theta=chosen["theta"],
-        theta_range=args.theta_range,
         posterior=chosen["posterior"],
         baseline=chosen["baseline"],
         baseline_sem=chosen["baseline_sem"],
         train_hours=round((time.time() - start) / 3600, 3),
         peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
-        gpu=torch.cuda.get_device_name(0),
     )
     (out / "run.json").write_text(json.dumps(summary, indent=1))
 

@@ -115,6 +115,24 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         raise ValueError("n_questions must be a multiple of batch")
     questions_per_theta = args.n_questions // args.batch
 
+    # config half of run.json goes out before the search so the dashboard can show the run while it runs
+    config = dict(
+        model=args.model,
+        task=args.task,
+        adapter=adapter.__name__.lower(),
+        loss="bo",
+        rank=args.rank,
+        proj_dim=args.proj_dim,
+        tie=1 if args.untie else 0,
+        seed=args.seed,
+        params=dim,
+        theta_range=args.theta_range,
+        max_steps=args.n_evals,
+        design=math.ceil((args.n_baseline + args.n_sobol) / args.batch),  # batches before the GP-guided ones
+        gpu=torch.cuda.get_device_name(0),
+    )
+    (out / "run.json").write_text(json.dumps(config, indent=1))
+
     def objective(thetas: Float[Tensor, "B T"], batch: int) -> list[tuple[float, float]]:
         """Per θ: logit of the K-rollout pass rate over its questions, with its posterior std; one LoRA per θ, one vLLM call."""
         rng = np.random.default_rng(args.seed + batch)
@@ -170,26 +188,15 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     print(f"saved adapter to {adapter_dir}")
 
     # resource summary the dashboard plots accuracy against (same keys as grpo.run)
-    summary = dict(
-        model=args.model,
-        task=args.task,
-        adapter=adapter.__name__.lower(),
-        loss="bo",
-        rank=args.rank,
-        proj_dim=args.proj_dim,
-        tie=1 if args.untie else 0,
-        seed=args.seed,
+    summary = config | dict(
         steps=chosen["steps"],
-        params=dim,
         theta=chosen["theta"],
-        theta_range=args.theta_range,
         # search values are logit pass rates; report the θ=0 baseline back on the accuracy scale
         baseline=torch.sigmoid(torch.tensor(chosen["baseline"])).item(),
         baseline_logit=chosen["baseline"],
         baseline_logit_sem=chosen["baseline_sem"],
         train_hours=round((time.time() - start) / 3600, 3),
         peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
-        gpu=torch.cuda.get_device_name(0),
     )
     (out / "run.json").write_text(json.dumps(summary, indent=1))
 
