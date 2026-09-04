@@ -97,7 +97,7 @@ class Snapshot(TrainerCallback):
         if last:
             self.adapter.export(self.model, str(out_dir))
         # same call the rollout path uses: a LoRARequest built from the live state_dict
-        request = self.model.load_lora("eval_lora", load_tensors=True)
+        request = self.model.load_lora(str(self.root / "eval_lora"), load_tensors=True)
         generate = lambda prompts: [
             o.outputs[0].text
             for o in self.model.fast_generate(
