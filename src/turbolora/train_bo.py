@@ -1,4 +1,4 @@
-"""BO training of TinyLoRA: θ = every v concatenated (one global v unless --untie), each trial scored by the logit vLLM pass rate on a random train subset."""
+"""BO training of TinyLoRA: θ = every v concatenated (one global v unless --untie), each trial scored by the logit vLLM pass rate on a random train subset (greedy by default)."""
 
 import argparse
 import json
@@ -36,9 +36,10 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="one v per module, θ ∈ ℝ^{u·modules} (default: one global v)",
     )
-    # objective: mean per-question pass rate on a fresh random train subset each call (one GRPO step of samples by default), split over --batch θ's
+    # objective: pass rate on a fresh random train subset each call (one GRPO step of prompts by default), split over --batch θ's
     parser.add_argument("--n-questions", type=int, default=grpo.PROMPTS_PER_STEP, help="prompts per objective call, shared by the batch")
-    parser.add_argument("--k-rollouts", type=int, default=grpo.ROLLOUTS_PER_PROMPT)
+    parser.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=True, help="greedy completions (the eval sampler); --no-greedy samples at GRPO's T=1")
+    parser.add_argument("--k-rollouts", type=int, default=1, help="completions per prompt (needs --no-greedy if >1)")
     parser.add_argument("--no-eval", action="store_true", help="snapshot the pick only, skip its evals")
     parser.add_argument(
         "--eval-tasks",
@@ -56,7 +57,7 @@ def grpo_steps(n_prompts: int) -> int:
 
 
 def grpo_budget_trials(n_prompts: int, n_questions: int, k_rollouts: int) -> int:
-    """GP-guided trials that sample as many completions as train_tinylora's default schedule (initial design not counted)."""
+    """GP-guided trials that generate as many completions as train_tinylora's default schedule (initial design not counted)."""
     epochs = grpo.argument_parser().get_default("epochs")
     completions = epochs * n_prompts * grpo.ROLLOUTS_PER_PROMPT
     return math.ceil(completions / (n_questions * k_rollouts))
@@ -116,6 +117,8 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         print(f"n_evals {args.n_evals} batches (GRPO completion budget)")
     if args.n_questions % args.batch:
         raise ValueError("n_questions must be a multiple of batch")
+    if args.greedy and args.k_rollouts > 1:
+        raise ValueError("greedy completions are identical: pass --no-greedy to use several rollouts per prompt")
     questions_per_theta = args.n_questions // args.batch
 
     # config half of run.json goes out before the search so the dashboard can show the run while it runs
@@ -154,7 +157,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
             use_tqdm=False,
             sampling_params=SamplingParams(
                 n=args.k_rollouts,
-                temperature=1.0,  # GRPO's rollout sampler TRL default
+                temperature=0.0 if args.greedy else 1.0,  # eval sampler vs GRPO's rollout sampler (TRL default)
                 max_tokens=args.max_completion,
                 stop=list(spec.prompt.stop),
                 seed=args.seed + batch,
@@ -164,9 +167,9 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
             [np.mean([grade(extract(o.text), a) for o in r.outputs]) for r, a in zip(outputs, answers)]
         ).reshape(len(thetas), questions_per_theta)
 
-        # Jeffreys Beta(½,½) posterior on each θ's pass rate, reported to the GP as its exact moment-matched Gaussian in logit space:
-        # logit(X) has cumulants ψ(a)−ψ(b), ψ₁(a)+ψ₁(b) (mean/variance exact; shape is skewed while a shape stays <1)
-        a, b = 0.5 + scores.sum(1), 0.5 + questions_per_theta - scores.sum(1)
+        # uniform Beta(1,1) posterior on each θ's pass rate, reported to the GP as its exact moment-matched Gaussian in logit space:
+        # logit(X) has cumulants ψ(a)−ψ(b), ψ₁(a)+ψ₁(b); a shape <1 (Jeffreys) makes the all-pass/all-fail corners badly skewed, 1 keeps them near-Gaussian
+        a, b = 1 + scores.sum(1), 1 + questions_per_theta - scores.sum(1)
         return [(float(digamma(ai) - digamma(bi)), float(math.sqrt(polygamma(1, ai) + polygamma(1, bi)))) for ai, bi in zip(a, b)]
 
     last_snapshot: dict = {}
