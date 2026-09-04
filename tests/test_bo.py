@@ -235,7 +235,7 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert loads["model_name"] == spec.hf_id
     assert loads["max_seq_length"] == 512 + 1024
     assert loads["max_lora_rank"] == 8 and loads["fast_inference"]
-    assert loads["gpu_memory_utilization"] == 0.45
+    assert loads["gpu_memory_utilization"] == 0.85  # BO holds no training state
     assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0)  # default: one global v
 
     # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per generation, no export

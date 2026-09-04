@@ -14,6 +14,7 @@ from botorch.models import SingleTaskGP
 from botorch.models.transforms.input import Normalize
 from botorch.models.transforms.outcome import Standardize
 from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from torch.quasirandom import SobolEngine
 
@@ -23,7 +24,7 @@ Objective = Callable[
 
 
 def fit_gp(trials: list[dict]) -> SingleTaskGP:
-    """GP on the objective with each trial's sem² as fixed observation noise (Matérn 5/2 ARD, normalized θ, standardized value)."""
+    """GP on the objective with each trial's sem² as observation noise plus a learned noise floor (Matérn 5/2 ARD, normalized θ, standardized value)."""
     X = torch.tensor([t["theta"] for t in trials], dtype=torch.float64)
     Y = torch.tensor([[t["value"]] for t in trials], dtype=torch.float64)
     Yvar = torch.tensor([[t["sem"] ** 2] for t in trials], dtype=torch.float64)
@@ -35,6 +36,8 @@ def fit_gp(trials: list[dict]) -> SingleTaskGP:
         input_transform=Normalize(d=X.shape[-1]),
         outcome_transform=Standardize(m=1),
     )
+    # the floor absorbs misfit beyond the binomial sem; the model holds the sem² already in standardized units
+    gp.likelihood = FixedNoiseGaussianLikelihood(noise=gp.likelihood.noise.detach(), learn_additional_noise=True).to(X)
     fit_gpytorch_mll(ExactMarginalLogLikelihood(gp.likelihood, gp))
     return gp.eval()
 

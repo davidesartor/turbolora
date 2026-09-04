@@ -29,17 +29,29 @@ ROLLOUTS_PER_PROMPT = 4
 MAX_PROMPT_LENGTH = 512  # 75 of 8521 hard prompts exceed it and are dropped
 
 
-def load_model(spec: Model, adapter: type[Adapter], rank: int, seed: int, max_completion: int, **adapter_kwargs):
-    """Base weights + colocated vLLM, with `adapter` attached; shared by the GRPO and BO trainers."""
-    # smaller GPUs (L40S 48G, A100 40G): give vLLM a larger share so its KV cache stays usable
+def load_model(
+    spec: Model,
+    adapter: type[Adapter],
+    rank: int,
+    seed: int,
+    max_completion: int,
+    vllm_share: float | None = None,
+    max_loras: int = 1,
+    **adapter_kwargs,
+):
+    """Base weights + colocated vLLM (one weight copy), with `adapter` attached; shared by the GRPO and BO trainers."""
+    # GRPO leaves half the card for training state; smaller GPUs (L40S 48G, A100 40G) give vLLM a bit more for KV cache
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+    if vllm_share is None:
+        vllm_share = 0.5 if vram_gb < 60 else 0.45
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=spec.hf_id,
         max_seq_length=MAX_PROMPT_LENGTH + max_completion,
         load_in_4bit=False,
         fast_inference=True,
         max_lora_rank=max(rank, 8),  # vLLM accepts only {1, 8, 16, ...}; pads smaller adapters
-        gpu_memory_utilization=0.5 if vram_gb < 60 else 0.45,
+        gpu_memory_utilization=vllm_share,
+        max_loras=max_loras,  # adapters vLLM can serve in one batch (forwarded to unsloth's load_vllm)
     )
     return adapter.attach(model, rank, seed, **adapter_kwargs), tokenizer
 

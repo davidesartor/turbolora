@@ -83,6 +83,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         args.rank,
         args.seed,
         args.max_completion,
+        vllm_share=0.85,  # no training state: the card is vLLM's, so small cards (L4 24G) work at a lower --n-questions
         proj_dim=args.proj_dim,
         tie=1 if args.untie else 0,
     )
