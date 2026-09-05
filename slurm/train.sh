@@ -1,6 +1,7 @@
 #!/bin/bash -l
 # Seed array for a full GRPO run. Usage: MODEL=qwen2.5-7b TASK=easy ADAPTER=lora [LOSS=gspo] [LR=5e-6] [CFG=r1] sbatch slurm/train.sh [--rank 1]
 # CFG names the run dir (<adapter>-<loss>[-lr<lr>]-<cfg>); single seed: sbatch -a 0 ...
+# 1.5B fits an L4/A40: sbatch --constraint='l4|a40|l40s|a100-40g|a100-80g|h100' (resume_sweep.sh does this)
 #SBATCH -J grpo
 #SBATCH -a 0-2
 #SBATCH -p gpu,gpu-preempt

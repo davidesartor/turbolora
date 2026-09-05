@@ -32,12 +32,14 @@ for run_dir in $(find outputs/runs -mindepth 3 -maxdepth 3 -type d | sort); do
     begin=()
     [ "$delay" -gt 0 ] && begin=(--begin="now+${delay}seconds")
 
-    # tinylora-bo-u<proj_dim> runs go through bo.sh (rank stays its default); 7B needs a 24G+ card
-    if [ "$loss" = bo ]; then
+    # tinylora-{bo,turbo}-u<proj_dim> runs go through bo.sh (rank stays its default); 7B needs a 24G+ card
+    if [ "$loss" = bo ] || [ "$loss" = turbo ]; then
         extra=(--proj-dim "${cfg#u}")
         case "$model" in qwen2.5-1.5b*) ;; *) begin+=(--constraint='l4|a40|l40s|a100-40g|a100-80g|h100') ;; esac
         script=slurm/bo.sh
     else
+        # 1.5B GRPO fits an L4/A40; the script's default constraint keeps the 40G+ cards for 7B
+        case "$model" in qwen2.5-1.5b*) begin+=(--constraint='l4|a40|l40s|a100-40g|a100-80g|h100') ;; esac
         script=slurm/train.sh
     fi
 
