@@ -139,7 +139,7 @@ tr.grp .chev { display: inline-block; width: 14px; color: var(--muted); }
 
 <header class="top">
   <div>
-    <div class="eyebrow">Greedy pass@1 · vLLM · math-verify grading</div>
+    <div class="eyebrow" id="objective-line"></div>
     <h1>TurboLoRA Curves</h1>
     <p>Accuracy of each adaptation against what it cost. Dashed lines are the untrained base models. Hover a point for the run, click it to open the run: training curves, evals and misses.</p>
   </div>
@@ -151,6 +151,7 @@ tr.grp .chev { display: inline-block; width: 14px; color: var(--muted); }
       <button type="button" data-x="params">Trainable params</button><button type="button" data-x="time">Training time</button><button type="button" data-x="vram">Peak VRAM</button>
     </div></div>
     <div class="control" id="train-control"><span class="eyebrow">Trained on</span><div class="toggle" id="train"></div></div>
+    <div class="control"><span class="eyebrow">Eval</span><div class="toggle" id="obj"></div></div>
   </div>
 </header>
 
@@ -193,15 +194,19 @@ const familyLabel = (f) => { const [base, v] = f.split("-"), name = FAMILY[base]
 const modelColor = (name) => { const f = familyOf(name), v = variantOf(name), sib = models.filter((m) => familyOf(m) === f), i = sib.indexOf(name); const hue = FAMILY_HUE[f] ?? FAMILY_HUE[baseFamilyOf(name)] ?? (families.indexOf(baseFamilyOf(name)) * 67) % 360; return `hsl(${hue} ${FAMILY_SAT[baseFamilyOf(name)] ?? (v ? 70 : 55)}% ${sib.length > 1 ? 30 + 35 * i / (sib.length - 1) : 42}%)`; };
 const tasks = DATA.tasks;
 const runs = Object.entries(DATA.runs ?? {});
+// `tasks` follows the eval-objective toggle: the accuracies of whichever objective is selected
+const objectives = DATA.objectives ?? { greedy: { suffix: "", label: "Greedy" } };
+for (const r of [...Object.values(DATA.models), ...Object.values(DATA.runs ?? {})]) Object.defineProperty(r, "tasks", { get: () => r.evals?.[state.obj] ?? {} });
+const evalPrefix = () => `eval${objectives[state.obj].suffix}_`;
 const trainSets = ["easy", "medium", "hard"];
 const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter);
 const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Math.round(55 * j / (n - 1))}%)` : c;
 const color = (i) => PALETTE[i % PALETTE.length];
 
 // ---- state: view + x axis persist per viewer, tab lives in the hash, hidden/expanded last the session
-const state = { view: "dataset", x: "params", train: "all", hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
+const state = { view: "dataset", x: "params", train: "all", obj: "greedy", hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("turbolora-curves") ?? "{}"), { hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() }); } catch {}
-const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train })); } catch {} };
+const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj })); } catch {} };
 // models with no training runs start hidden in the chart; the legend brings them back
 const modelsWithRuns = new Set(runs.map(([, r]) => r.model));
 for (const m of models) if (!modelsWithRuns.has(m)) state.hidden.add(modelLabel(m));
@@ -233,6 +238,9 @@ function seriesFor(view, tab) {
 function renderControls() {
   for (const b of document.querySelectorAll("#view button")) b.classList.toggle("on", b.dataset.v === state.view);
   for (const b of document.querySelectorAll("#xaxis button")) b.classList.toggle("on", b.dataset.x === state.x);
+  if (!objectives[state.obj]) state.obj = "greedy";
+  $("#obj").innerHTML = Object.entries(objectives).map(([k, o]) => `<button type="button" data-o="${esc(k)}" class="${k === state.obj ? "on" : ""}">${esc(o.label)}</button>`).join("");
+  $("#objective-line").textContent = `${objectives[state.obj].label} pass@1 · vLLM · math-verify grading`;
   $("#train").innerHTML = ["all", ...trainSets].map((t) => `<button type="button" data-t="${esc(t)}" class="${t === state.train ? "on" : ""}">${t === "all" ? "any" : esc(label(t))}</button>`).join("");
   const tab = currentTab();
   const link = (t) => `<a href="#${encodeURIComponent(t)}" class="${t === tab ? "active" : ""}">${esc(state.view === "dataset" ? label(t) : modelLabel(t))}</a>`;
@@ -240,6 +248,7 @@ function renderControls() {
 }
 $("#view").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.view = b.dataset.v; persist(); location.hash = ""; render(); });
 $("#train").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.train = b.dataset.t; persist(); render(); });
+$("#obj").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.obj = b.dataset.o; persist(); render(); });
 $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.x = b.dataset.x; persist(); render(); });
 window.addEventListener("hashchange", render);
 
@@ -340,11 +349,11 @@ function renderTable(series) {
     const modelNode = shared ? famId(s.model).reduce((n, lvl) => child(n, lvl, s.color), root) : root;
     const holder = (r) => child(modelNode, r.adapter ?? "?", s.color);
     // the baseline rides on the model's folder row in dataset view; model view gets a section row (no folder row to merge into)
-    if (s.baseStats) shared ? (modelNode.baseline ??= s) : (root.base ??= () => `<tr><td class="series" style="--c:${s.color}"><i></i>${esc(s.name)}</td><td class="base">base model</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono">${pct(s.base)}</td><td class="mono base">–</td><td class="mono miss" data-model="${s.model}" data-task="${s.task}">${s.baseStats.n - s.baseStats.n_correct}${s.baseStats.unparsed ? `<span style="color:var(--warn)"> +${s.baseStats.unparsed}</span>` : ""}</td></tr>`);
+    if (s.baseStats) shared ? (modelNode.baseline ??= s) : (root.base ??= () => `<tr><td class="series" style="--c:${s.color}"><i></i>${esc(s.name)}</td><td class="base">base model</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono">${pct(s.base)}</td><td class="mono base">–</td><td class="mono miss" data-model="${s.model}" data-task="${s.task}">${s.baseStats.wrong}${s.baseStats.unparsed ? `<span style="color:var(--warn)"> +${s.baseStats.unparsed}</span>` : ""}</td></tr>`);
     if (state.hidden.has(s.name)) continue; // chart-hidden models keep only their collapsed baseline row
     for (const p of s.points) {
       const st = p.run.tasks[p.task], d = s.base == null ? null : 100 * (p.y - s.base);
-      holder(p.run).entries.push({ y: p.y, d, run: p.run, html: (dep) => `<tr><td class="series" style="--c:${s.color}"><i></i></td><td class="run"${pad(dep)}><a href="${runHref(p.id)}">${esc(leafOf(p.id, p.run))}</a>${p.run.status === "running" ? `<small style="color:var(--muted);margin-left:8px">eval @ step ${p.run.eval_step}${p.run.max_steps ? `/${p.run.max_steps}` : ""}</small>` : ""}</td>${res(p.run)}<td class="mono">${pct(p.y)}</td><td class="mono ${d == null ? "" : d >= 0 ? "pos" : "neg"}">${d == null ? "–" : signed(d)}</td><td class="mono miss" data-run="${esc(p.id)}" data-task="${p.task}">${st.n - st.n_correct}${st.unparsed ? `<span style="color:var(--warn)"> +${st.unparsed}</span>` : ""}</td></tr>` });
+      holder(p.run).entries.push({ y: p.y, d, run: p.run, html: (dep) => `<tr><td class="series" style="--c:${s.color}"><i></i></td><td class="run"${pad(dep)}><a href="${runHref(p.id)}">${esc(leafOf(p.id, p.run))}</a>${p.run.status === "running" ? `<small style="color:var(--muted);margin-left:8px">eval @ step ${p.run.eval_step[state.obj]}${p.run.max_steps ? `/${p.run.max_steps}` : ""}</small>` : ""}</td>${res(p.run)}<td class="mono">${pct(p.y)}</td><td class="mono ${d == null ? "" : d >= 0 ? "pos" : "neg"}">${d == null ? "–" : signed(d)}</td><td class="mono miss" data-run="${esc(p.id)}" data-task="${p.task}">${st.wrong}${st.unparsed ? `<span style="color:var(--warn)"> +${st.unparsed}</span>` : ""}</td></tr>` });
     }
     if (s.primary) for (const [id, r] of runs) if (r.model === s.model && !r.tasks[s.task] && trainOk(r)) holder(r).entries.push({ run: r, html: (dep) => `<tr><td class="series" style="--c:${s.color}"><i></i></td><td class="run"${pad(dep)}><a href="${runHref(id)}">${esc(leafOf(id, r))}</a><small style="color:var(--muted);margin-left:8px">${r.status === "running" ? `${live(r) ? "training" : "queued"} · step ${r.step ?? 0}${r.max_steps ? `/${r.max_steps}` : ""}${eta(r) ? ` · ${eta(r)}` : r.idle_hours ? ` · idle ${dur(r.idle_hours)}` : ""}` : `not evaluated on ${label(s.task)}`}</small></td>${res(r)}<td class="mono base">–</td><td class="mono base">–</td><td class="mono base">–</td></tr>` });
   }
@@ -368,7 +377,7 @@ function renderTable(series) {
     for (const [name, c] of n.children) {
       const key = `${prefix}/${name}`, closed = !state.expanded.has(key), b = bestOf(c), st = statsOf(c), bs = c.baseline;
       if (!st.done && !st.running && !st.pending && !hasBase(c)) continue;
-      out.push(`<tr class="grp" data-key="${esc(key)}"><td class="series" style="--c:${c.color}"><i></i></td><td class="run"${pad(dep)}><span class="chev">${closed ? "▸" : "▾"}</span><b>${esc(name)}</b><small style="color:var(--muted);margin-left:8px">${hintOf(st) || (hasBase(c) ? "base only" : "")}</small></td><td class="mono base">–</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono${bs ? " base" : ""}" title="${bs ? "base model" : "best run"}">${bs ? pct(bs.base) : b?.y != null ? pct(b.y) : "–"}</td><td class="mono ${b?.d == null ? "" : b.d >= 0 ? "pos" : "neg"}" title="best run">${b?.d == null ? "–" : signed(b.d)}</td>${bs ? `<td class="mono miss" data-model="${bs.model}" data-task="${bs.task}">${bs.baseStats.n - bs.baseStats.n_correct}${bs.baseStats.unparsed ? `<span style="color:var(--warn)"> +${bs.baseStats.unparsed}</span>` : ""}</td>` : `<td class="mono base">–</td>`}</tr>`);
+      out.push(`<tr class="grp" data-key="${esc(key)}"><td class="series" style="--c:${c.color}"><i></i></td><td class="run"${pad(dep)}><span class="chev">${closed ? "▸" : "▾"}</span><b>${esc(name)}</b><small style="color:var(--muted);margin-left:8px">${hintOf(st) || (hasBase(c) ? "base only" : "")}</small></td><td class="mono base">–</td><td class="mono base">–</td><td class="mono base">–</td><td class="mono${bs ? " base" : ""}" title="${bs ? "base model" : "best run"}">${bs ? pct(bs.base) : b?.y != null ? pct(b.y) : "–"}</td><td class="mono ${b?.d == null ? "" : b.d >= 0 ? "pos" : "neg"}" title="best run">${b?.d == null ? "–" : signed(b.d)}</td>${bs ? `<td class="mono miss" data-model="${bs.model}" data-task="${bs.task}">${bs.baseStats.wrong}${bs.baseStats.unparsed ? `<span style="color:var(--warn)"> +${bs.baseStats.unparsed}</span>` : ""}</td>` : `<td class="mono base">–</td>`}</tr>`);
       if (!closed) emit(c, dep + 1, key);
     }
     for (const e of n.entries) out.push(e.html(dep));
@@ -491,7 +500,7 @@ function renderBOSection(r) {
 }
 function renderRun(id) {
   const r = DATA.runs[id], tab = currentTab();
-  const meta = [["model", modelLabel(r.model)], ["task", label(r.task)], ["adapter", ADAPTER[r.adapter] ?? r.adapter], ["loss", r.loss], ["rank", r.rank], ["u", r.proj_dim], ["tie", r.tie], ["seed", r.seed], ["steps", r.status === "running" ? `${r.step ?? 0}${r.max_steps ? ` / ${r.max_steps}` : ""}` : r.steps], ["eval step", r.status === "running" && r.eval_step != null ? r.eval_step : null], ["eta", r.status !== "running" ? null : eta(r) ? `${eta(r)} (${clock(r.eta_time)})` : r.idle_hours ? `queued, idle ${dur(r.idle_hours)}` : null],
+  const meta = [["model", modelLabel(r.model)], ["task", label(r.task)], ["adapter", ADAPTER[r.adapter] ?? r.adapter], ["loss", r.loss], ["rank", r.rank], ["u", r.proj_dim], ["tie", r.tie], ["seed", r.seed], ["steps", r.status === "running" ? `${r.step ?? 0}${r.max_steps ? ` / ${r.max_steps}` : ""}` : r.steps], ["eval step", r.status === "running" && r.eval_step[state.obj] != null ? r.eval_step[state.obj] : null], ["eta", r.status !== "running" ? null : eta(r) ? `${eta(r)} (${clock(r.eta_time)})` : r.idle_hours ? `queued, idle ${dur(r.idle_hours)}` : null],
     ["params", r.params != null ? XAXIS.params.fmt(r.params) : null], ["time", r.train_hours != null ? XAXIS.time.fmt(r.train_hours) : null], ["VRAM", r.peak_vram_gb != null ? XAXIS.vram.fmt(r.peak_vram_gb) : null], ["gpu", r.gpu]]
     .filter(([, v]) => v != null).map(([k, v]) => `<span class="chip"><span>${esc(k)}</span><span class="mono" style="color:inherit;margin:0">${esc(v)}</span></span>`).join("");
   const curves = (r.curves ?? []);
@@ -501,18 +510,18 @@ function renderRun(id) {
   const section = (title, cells) => cells ? `<div class="multiples-group"><div class="eyebrow">${esc(title)}</div><div class="multiples">${cells}</div></div>` : "";
   // benchmarks first: one card per eval_<task> series, unparsed count folded into the header, base accuracy as reference line
   const allKeys = [...new Set(curves.flatMap(Object.keys))];
-  const benches = allKeys.filter((k) => k.startsWith("eval_") && !k.endsWith("_unparsed")).sort().map((k) => {
-    const t = k.slice(5), last = curves.filter((row) => row[k] != null).pop(), un = last[`${k}_unparsed`];
+  const benches = allKeys.filter((k) => k.startsWith(evalPrefix()) && !k.endsWith("_unparsed")).sort().map((k) => {
+    const t = k.slice(evalPrefix().length), last = curves.filter((row) => row[k] != null).pop(), un = last[`${k}_unparsed`];
     return cell(k, label(t), `${pct(last[k])}${un ? ` <span style="color:var(--warn)">${un} unparsed</span>` : ""}`, DATA.models[r.model]?.tasks[t]?.accuracy);
   }).join("");
   const known = new Set([...CURVE_GROUPS.flatMap(([, ks]) => ks.map(([k]) => k)), "step", "epoch"]);
-  const extras = allKeys.filter((k) => !known.has(k) && !k.startsWith("eval_"));
+  const extras = allKeys.filter((k) => !known.has(k) && !k.startsWith("eval"));
   const multiples = [
-    section("Benchmarks · full test set, greedy at the training budget", benches),
+    section(`Benchmarks · full test set, ${objectives[state.obj].label.toLowerCase()} at the training budget`, benches),
     ...CURVE_GROUPS.map(([title, ks]) => section(title, ks.map(([k, name]) => cell(k, name)).join(""))),
     section("Other", extras.map((k) => cell(k, k)).join("")),
   ].join("");
-  const evals = Object.entries(r.tasks).map(([t, st]) => { const base = DATA.models[r.model]?.tasks[t]?.accuracy, d = base == null ? null : 100 * (st.accuracy - base); return `<tr><td>${label(t)}</td><td class="mono">${pct(st.accuracy)}</td><td class="mono base">${base == null ? "–" : pct(base)}</td><td class="mono ${d == null ? "" : d >= 0 ? "pos" : "neg"}">${d == null ? "–" : signed(d)}</td><td class="mono miss" data-run="${esc(id)}" data-task="${t}">${st.n - st.n_correct}${st.unparsed ? `<span style="color:var(--warn)"> +${st.unparsed}</span>` : ""}</td></tr>`; }).join("");
+  const evals = Object.entries(r.tasks).map(([t, st]) => { const base = DATA.models[r.model]?.tasks[t]?.accuracy, d = base == null ? null : 100 * (st.accuracy - base); return `<tr><td>${label(t)}</td><td class="mono">${pct(st.accuracy)}</td><td class="mono base">${base == null ? "–" : pct(base)}</td><td class="mono ${d == null ? "" : d >= 0 ? "pos" : "neg"}">${d == null ? "–" : signed(d)}</td><td class="mono miss" data-run="${esc(id)}" data-task="${t}">${st.wrong}${st.unparsed ? `<span style="color:var(--warn)"> +${st.unparsed}</span>` : ""}</td></tr>`; }).join("");
   $("#page").innerHTML = `
     <a class="back" href="#${encodeURIComponent(tab)}">← ${esc(state.view === "dataset" ? label(tab) : modelLabel(tab))}</a>
     <div class="panel">
@@ -522,7 +531,7 @@ function renderRun(id) {
       ${r.bo ? renderBOSection({ ...r, id }) : ""}
       ${multiples || (r.bo ? "" : `<div class="placeholder">No training curves yet.</div>`)}
     </div>
-    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>sbatch slurm/eval_sweep.sh</code></div>`}`;
+    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>sbatch slurm/${state.obj === "greedy" ? "eval_sweep.sh" : "eval_sampled_sweep.sh"}</code></div>`}`;
 }
 
 // ---- tooltip + drawer
@@ -537,10 +546,11 @@ function showTip(el) {
 }
 function openDrawer(who, task, stats) {
   closeDrawer();
-  const items = stats.misses.map((r) => `<li><q>${esc(DATA.questions[r.q])}</q><div class="pair"><span>predicted <b class="${r.predicted == null ? "none" : "pred"} mono">${r.predicted == null ? "unparsed" : esc(r.predicted)}</b></span><span>answer <b class="gold mono">${esc(r.answer)}</b></span></div></li>`);
+  const pred = (v) => `<b class="${v == null ? "none" : "pred"} mono">${v == null ? "unparsed" : esc(v)}</b>`;
+  const items = stats.misses.map((r) => `<li><q>${esc(DATA.questions[r.q])}</q><div class="pair"><span>predicted ${(Array.isArray(r.predicted) ? r.predicted : [r.predicted]).map(pred).join(" ")}</span><span>answer <b class="gold mono">${esc(r.answer)}</b></span></div></li>`);
   const drawer = document.createElement("aside");
   drawer.className = "drawer";
-  drawer.innerHTML = `<header><div><div class="eyebrow">${esc(who)} · ${label(task)}</div><h2>${stats.misses.length} wrong of ${stats.n} <span style="color:var(--muted);font-weight:500">(${stats.unparsed} unparsed)</span></h2></div><button type="button" id="close">Close</button></header>${items.length ? `<ol>${items.join("")}</ol>` : `<div class="empty">Every answer was correct.</div>`}`;
+  drawer.innerHTML = `<header><div><div class="eyebrow">${esc(who)} · ${label(task)}</div><h2>${stats.wrong} wrong of ${stats.n * (stats.samples ?? 1)}${stats.samples ? ` completions (${stats.misses.length} questions not fully solved)` : ""} <span style="color:var(--muted);font-weight:500">(${stats.unparsed} unparsed)</span></h2></div><button type="button" id="close">Close</button></header>${items.length ? `<ol>${items.join("")}</ol>` : `<div class="empty">Every answer was correct.</div>`}`;
   document.body.appendChild(drawer);
   drawer.querySelector("#close").onclick = closeDrawer;
   drawer.querySelector("#close").focus();

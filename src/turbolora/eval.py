@@ -1,4 +1,4 @@
-"""Greedy (pass@1) test-set eval of a model, optionally with a trained adapter, on one or more tasks with vLLM."""
+"""Test-set eval of a model, optionally with a trained adapter, on one or more tasks with vLLM: greedy by default, or K sampled completions per question (--samples K)."""
 
 import argparse
 import gzip
@@ -19,38 +19,54 @@ from turbolora.tasks import TASKS, extract, grade
 
 
 def evaluate(
-    generate: Callable[[list[str]], list[str]],
+    generate: Callable[[list[str]], list[list[str]]],
     spec: Model,
     dataset: Dataset,
 ) -> list[dict]:
-    """One record per example: completion, extracted prediction, answer, and whether it was graded correct."""
+    """One record per example: completion, extracted prediction, answer, and correctness; lists of each when sampling K > 1."""
     completions = generate([spec.prompt(q) for q in dataset["question"]])
     records = []
-    for example, completion in zip(dataset.to_list(), completions):
-        predicted = extract(completion)
-        correct = grade(predicted, example["answer"])
-        graded = dict(predicted=predicted, correct=correct, completion=completion)
+    for example, samples in zip(dataset.to_list(), completions):
+        predicted = [extract(c) for c in samples]
+        correct = [grade(p, example["answer"]) for p in predicted]
+        graded = (
+            dict(predicted=predicted[0], correct=correct[0], completion=samples[0])
+            if len(samples) == 1
+            else dict(predicted=predicted, correct=correct, completions=samples)
+        )
         records.append(example | graded)
     return records
 
 
 def summarize(records: list[dict]) -> dict:
+    """Greedy: accuracy over questions. Sampled: accuracy = mean correctness over every completion (pass@1, GRPO's reward), pass_any = any of the K."""
+    if not isinstance(records[0]["correct"], list):
+        return {
+            "accuracy": sum(r["correct"] for r in records) / len(records),
+            "n_correct": sum(r["correct"] for r in records),
+            "n": len(records),
+            "unparsed": sum(r["predicted"] is None for r in records),
+        }
+    k = len(records[0]["correct"])
+    correct = sum(sum(r["correct"]) for r in records)
     return {
-        "accuracy": sum(r["correct"] for r in records) / len(records),
-        "n_correct": sum(r["correct"] for r in records),
+        "accuracy": correct / (k * len(records)),
+        "n_correct": correct,
         "n": len(records),
-        "unparsed": sum(r["predicted"] is None for r in records),
+        "samples": k,
+        "pass_any": sum(any(r["correct"]) for r in records) / len(records),
+        "unparsed": sum(p is None for r in records for p in r["predicted"]),
     }
 
 
 def write_result(
-    out_dir: Path, task: str, stats: dict, records: list[dict], **meta
+    out_dir: Path, task: str, stats: dict, records: list[dict], suffix: str = "", **meta
 ) -> None:
-    """<task>.json.gz holds every record; eval.json accumulates the per-task stats."""
+    """<task><suffix>.json.gz holds every record; eval<suffix>.json accumulates the per-task stats (suffix "@K" for sampled evals)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    with gzip.open(out_dir / f"{task}.json.gz", "wt", compresslevel=9) as f:
+    with gzip.open(out_dir / f"{task}{suffix}.json.gz", "wt", compresslevel=9) as f:
         json.dump({"task": task, **meta, **stats, "records": records}, f)
-    summary_path = out_dir / "eval.json"
+    summary_path = out_dir / f"eval{suffix}.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     summary[task] = stats
     summary_path.write_text(json.dumps(summary, indent=1))
@@ -117,6 +133,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--samples", type=int, default=1, help="completions per question; >1 samples at --temperature and writes <task>@K files"
+    )
+    parser.add_argument("--temperature", type=float, default=1.0, help="sampling temperature when --samples > 1 (GRPO rollouts use 1.0)")
     parser.add_argument("--tp", type=int, default=1, help="tensor parallel size (GPUs)")
     parser.add_argument(
         "--out-dir",
@@ -162,8 +182,11 @@ if __name__ == "__main__":
         **multimodal,
         **lora,
     )
+    sampled = args.samples > 1
+    suffix = f"@{args.samples}" if sampled else ""
     sampling = SamplingParams(
-        temperature=0.0,
+        n=args.samples,
+        temperature=args.temperature if sampled else 0.0,
         max_tokens=max_tokens,
         stop=list(spec.prompt.stop),
     )
@@ -176,12 +199,12 @@ if __name__ == "__main__":
             else None
         )
         generate = lambda prompts: [
-            o.outputs[0].text
+            [c.text for c in o.outputs]
             for o in llm.generate(prompts, sampling, lora_request=lora_request)
         ]
 
         for task in args.tasks:
-            out_path = out_dir / f"{task}.json.gz"
+            out_path = out_dir / f"{task}{suffix}.json.gz"
             if args.skip_existing and out_path.exists():
                 print(f"skipping {out_path}")
                 continue
@@ -193,16 +216,16 @@ if __name__ == "__main__":
             for record in records[: args.show]:
                 print("=" * 80)
                 print(f"question:  {record['question']}")
-                print(f"completion:\n{record['completion']}")
+                print(f"completion:\n{record.get('completion', record.get('completions', [''])[0])}")
                 print(f"predicted: {record['predicted']}   answer: {record['answer']}")
             print(
                 f"[{args.model}/{task}] accuracy: {stats['accuracy']:.4f} "
-                f"({stats['n_correct']}/{stats['n']}), unparsed: {stats['unparsed']}, "
+                f"({stats['n_correct']}/{stats['n'] * stats.get('samples', 1)}), unparsed: {stats['unparsed']}, "
                 f"{stats['seconds']}s, {stats['vram_used_gb']}/{stats['vram_total_gb']} GB on {stats['gpu']}"
             )
 
             write_result(
-                out_dir, task, stats, records, model=spec.hf_id, adapter=adapter
+                out_dir, task, stats, records, suffix, model=spec.hf_id, adapter=adapter, temperature=sampling.temperature
             )
             print(f"wrote {out_path}")
 

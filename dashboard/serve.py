@@ -15,6 +15,8 @@ from turbolora.tasks import TASKS
 
 TEMPLATE = Path(__file__).with_name("template.html")
 EVAL_TASKS = [t for t in TASKS if not t.startswith(("easy", "medium", "hard"))]
+# eval objective -> file suffix of `turbolora.eval` (<task><suffix>.json.gz, eval<suffix>.json); curve keys are eval<suffix>_<task>
+OBJECTIVES = {"greedy": dict(suffix="", label="Greedy"), "sampled": dict(suffix="@4", label="4 samples · T=1")}
 
 # metrics no card renders: the min/max envelopes, the raw reward mirrors and the duplicate length series
 CURVE_DROP = re.compile(
@@ -33,9 +35,10 @@ def load_task(path: Path) -> dict:
     misses = [
         dict(question=r["question"][:240], predicted=r["predicted"], answer=r["answer"])
         for r in data["records"]
-        if not r["correct"]
+        if not (all(r["correct"]) if isinstance(r["correct"], list) else r["correct"])
     ]
-    return {k: v for k, v in data.items() if k != "records"} | dict(misses=misses)
+    stats = {k: v for k, v in data.items() if k != "records"}
+    return stats | dict(misses=misses, wrong=stats["n"] * stats.get("samples", 1) - stats["n_correct"])
 
 
 def load_curves(run_dir: Path) -> list[dict]:
@@ -54,25 +57,33 @@ def load_curves(run_dir: Path) -> list[dict]:
     ]
 
 
-def last_full_eval(run_dir: Path) -> Path | None:
+def task_files(snapshot: Path, suffix: str) -> dict[str, Path]:
+    """<task><suffix>.json.gz files of one eval objective, keyed by task."""
+    return {p.name.removesuffix(f"{suffix}.json.gz"): p for p in sorted(snapshot.glob(f"*{suffix}.json.gz")) if p.name.removesuffix(f"{suffix}.json.gz") in EVAL_TASKS}
+
+
+def last_full_eval(run_dir: Path, suffix: str) -> Path | None:
     """The newest snapshot evaluated on every task any snapshot of this run has (a running job writes evals one task at a time)."""
-    evaluated = {s: {p.name for p in s.glob("*.json.gz")} for s in by_step(run_dir.glob("snapshots/step-*"))}
+    evaluated = {s: set(task_files(s, suffix)) for s in by_step(run_dir.glob("snapshots/step-*"))}
     full = set().union(*evaluated.values()) if evaluated else set()
     complete = [s for s, done in evaluated.items() if done == full]
-    return complete[-1] if complete else None
+    return complete[-1] if complete and full else None
 
 
 def eval_curves(run_dir: Path) -> list[dict]:
-    """One eval_<task> row per evaluated snapshot, in the same shape as the training rows."""
+    """One eval<suffix>_<task> row per evaluated snapshot and objective, in the same shape as the training rows."""
     rows = []
     for snapshot in by_step(run_dir.glob("snapshots/step-*")):
-        if not (snapshot / "eval.json").exists():
-            continue
         row = {"step": step_of(snapshot)}
-        for task, stats in json.loads((snapshot / "eval.json").read_text()).items():
-            row[f"eval_{task}"] = rnd(stats["accuracy"])
-            row[f"eval_{task}_unparsed"] = stats["unparsed"]
-        rows.append(row)
+        for obj in OBJECTIVES.values():
+            summary = snapshot / f"eval{obj['suffix']}.json"
+            if not summary.exists():
+                continue
+            for task, stats in json.loads(summary.read_text()).items():
+                row[f"eval{obj['suffix']}_{task}"] = rnd(stats["accuracy"])
+                row[f"eval{obj['suffix']}_{task}_unparsed"] = stats["unparsed"]
+        if len(row) > 1:
+            rows.append(row)
     return rows
 
 
@@ -222,12 +233,12 @@ def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
 def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: bool = False) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
-    for path in sorted(baselines_dir.glob("*/*.json.gz")):
-        name, task = path.parent.name, path.name.removesuffix(".json.gz")
-        if name not in MODELS or task not in EVAL_TASKS:
+    for model_dir in sorted(baselines_dir.glob("*")):
+        if model_dir.name not in MODELS:
             continue
-        models.setdefault(name, dict(hf_id=MODELS[name].hf_id, tasks={}))
-        models[name]["tasks"][task] = load_task(path)
+        evals = {name: {task: load_task(p) for task, p in task_files(model_dir, obj["suffix"]).items()} for name, obj in OBJECTIVES.items()}
+        if any(evals.values()):
+            models[model_dir.name] = dict(hf_id=MODELS[model_dir.name].hf_id, evals=evals)
 
     # every trainer writes the config half of run.json before its first step; the latest fully evaluated snapshot is the headline accuracy
     runs = {}
@@ -239,24 +250,25 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: 
         # the same adapter searched by BO/TuRBO is its own family on the plot, not a TinyLoRA-GRPO point
         if summary["loss"] in ("bo", "turbo"):
             summary |= dict(adapter=f"{summary['adapter']}-{summary['loss']}")
-        last = last_full_eval(run_dir)
-        tasks = {}
-        if last:
-            summary |= dict(eval_step=step_of(last))
-            tasks = {p.name.removesuffix(".json.gz"): load_task(p) for p in sorted(last.glob("*.json.gz")) if p.name.removesuffix(".json.gz") in EVAL_TASKS}
+        evals, eval_step = {}, {}
+        for name, obj in OBJECTIVES.items():
+            last = last_full_eval(run_dir, obj["suffix"])
+            evals[name] = {task: load_task(p) for task, p in task_files(last, obj["suffix"]).items()} if last else {}
+            if last:
+                eval_step[name] = step_of(last)
         curves = sorted(thin(load_curves(run_dir), curve_every) + eval_curves(run_dir), key=lambda row: row.get("step", 0))
-        runs[str(run_dir.relative_to(runs_dir))] = summary | load_progress(run_dir, summary, curves) | load_bo(run_dir, summary, wait_gp) | dict(tasks=tasks, curves=curves)
+        runs[str(run_dir.relative_to(runs_dir))] = summary | load_progress(run_dir, summary, curves) | load_bo(run_dir, summary, wait_gp) | dict(evals=evals, eval_step=eval_step, curves=curves)
 
     # keep MODELS' declaration order so families stay grouped
     ordered = {name: models[name] for name in MODELS if name in models}
 
     # the same benchmark question is missed by hundreds of runs: store each once and index into the pool
     questions: dict[str, int] = {}
-    for stats in [t for r in runs.values() for t in r["tasks"].values()] + [t for m in ordered.values() for t in m["tasks"].values()]:
+    for stats in [t for r in [*runs.values(), *ordered.values()] for e in r["evals"].values() for t in e.values()]:
         for miss in stats["misses"]:
             miss["q"] = questions.setdefault(miss.pop("question"), len(questions))
 
-    return dict(models=ordered, runs=runs, questions=list(questions), tasks=EVAL_TASKS)
+    return dict(models=ordered, runs=runs, questions=list(questions), tasks=EVAL_TASKS, objectives=OBJECTIVES)
 
 
 class Dashboard(http.server.BaseHTTPRequestHandler):
