@@ -57,7 +57,7 @@ nav .group .eyebrow { padding: 0 6px 10px 0; }
 .legend .key { gap: 4px 12px; color: var(--muted); font-size: 11px; }
 .legend .key button { color: var(--muted); font-size: 11px; }
 .legend .key button.off svg { opacity: 0.3; }
-.legend .swatch.dash { background: repeating-linear-gradient(90deg, var(--muted) 0 3px, transparent 3px 6px); }
+.legend .key svg { width: 14px; height: 14px; flex: none; }
 
 .chart-wrap { position: relative; }
 svg { display: block; width: 100%; height: auto; font-family: "IBM Plex Mono", monospace; font-size: 11px; }
@@ -125,15 +125,10 @@ svg.spark text { fill: var(--muted); font-size: 10px; }
 svg .ebar { stroke: var(--muted); stroke-width: 1; opacity: 0.6; }
 svg .design { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; }
 svg .pick { fill: none; stroke: var(--ink); stroke-width: 1.5; }
-svg .cell { stroke: none; }
 .bo-slider { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; }
 .bo-slider input { flex: 1; max-width: 480px; accent-color: var(--accent); }
 .bo-slider .ticks { display: flex; gap: 8px; font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--muted); }
 .bo-head { font-size: 12px; color: var(--muted); margin: 6px 0 2px; }
-.heat { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 10px; }
-.heat .multiple { padding-bottom: 10px; }
-.ramp { height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--surface), var(--accent)); margin: 6px 0 2px; }
-.ramp-ends { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); }
 td.run a { color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--muted); }
 td.run a:hover { border-bottom-style: solid; }
 tr.grp td { cursor: pointer; background: var(--ground); }
@@ -164,7 +159,7 @@ tr.grp .chev { display: inline-block; width: 14px; color: var(--muted); }
 
 <script>
 const DATA = /*__DATA__*/null;
-const TASK_LABEL = { gsm8k: "GSM8K", math500: "MATH-500", minerva: "Minerva", olympiad: "Olympiad", aime24: "AIME24", amc23: "AMC23", math: "MATH", easy: "SimpleRL easy", medium: "SimpleRL medium", hard: "SimpleRL hard" };
+const TASK_LABEL = { gsm8k: "GSM8K", math500: "MATH-500", minerva: "Minerva", olympiad: "Olympiad", aime24: "AIME24", amc23: "AMC23", easy: "SimpleRL easy", medium: "SimpleRL medium", hard: "SimpleRL hard" };
 const XAXIS = {
   params: { key: "params", title: "trainable parameters", log: true, fmt: (v) => { const u = v >= 1e6 ? [1e6, "M"] : v >= 1e3 ? [1e3, "k"] : [1, ""], n = v / u[0]; return `${n >= 10 ? Math.round(n) : Number(n.toPrecision(2))}${u[1]}`; } },
   time: { key: "train_hours", title: "training time (GPU hours)", log: false, fmt: (v) => v < 1 ? `${Math.round(v * 60)} min` : `${v.toFixed(1)} h` },
@@ -249,11 +244,12 @@ $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("butto
 window.addEventListener("hashchange", render);
 
 // ---- the chart
-const ADAPTER = { tinylora: "TinyLoRA", "tinylora-bo": "TinyLoRA BO", loraxs: "LoRA-XS", lora: "LoRA", full: "full FT" };
+const ADAPTER = { tinylora: "TinyLoRA", "tinylora-bo": "TinyLoRA BO", "tinylora-turbo": "TinyLoRA TuRBO", loraxs: "LoRA-XS", lora: "LoRA", full: "full FT" };
 // colour carries the series, shape carries the adapter: the families overlap in parameter count so position alone cannot separate them
 const MARK = {
   tinylora: (x, y, r) => `<polygon points="${x},${y - r * 1.3} ${x + r * 1.3},${y} ${x},${y + r * 1.3} ${x - r * 1.3},${y}"`,
   "tinylora-bo": (x, y, r) => `<polygon points="${x},${y - r * 1.5} ${x + r * 0.45},${y - r * 0.45} ${x + r * 1.5},${y} ${x + r * 0.45},${y + r * 0.45} ${x},${y + r * 1.5} ${x - r * 0.45},${y + r * 0.45} ${x - r * 1.5},${y} ${x - r * 0.45},${y - r * 0.45}"`,
+  "tinylora-turbo": (x, y, r) => `<polygon points="${x},${y - r * 1.4} ${x + r * 1.33},${y - r * 0.43} ${x + r * 0.82},${y + r * 1.13} ${x - r * 0.82},${y + r * 1.13} ${x - r * 1.33},${y - r * 0.43}"`,
   loraxs: (x, y, r) => `<rect x="${x - r}" y="${y - r}" width="${2 * r}" height="${2 * r}"`,
   lora: (x, y, r) => `<circle cx="${x}" cy="${y}" r="${r}"`,
   full: (x, y, r) => `<polygon points="${x},${y - r * 1.4} ${x + r * 1.3},${y + r} ${x - r * 1.3},${y + r}"`,
@@ -395,7 +391,6 @@ function render() {
       <div class="panel-head"><h2>${title}</h2>${renderLegend(series)}</div>
       <div class="chart-wrap">${renderChart(series)}</div>
     </div>
-    ${runs.length ? "" : `<div class="placeholder">Training runs appear here once <code>outputs/&lt;run&gt;/run.json</code> (written by train.py) and <code>outputs/&lt;run&gt;/eval/&lt;task&gt;.json</code> exist.</div>`}
     ${renderTable(series)}`;
 }
 
@@ -414,7 +409,6 @@ const CURVE_GROUPS = [
     ["peak_vram_gib", "peak VRAM (GiB)"], ["elapsed_hours", "elapsed hours"],
   ]],
 ];
-// duplicates and min/max variants of keys already charted; keep them out of "Other"
 const clock = (t) => new Date(1000 * t).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 const dur = (h) => h < 1 ? `${Math.max(1, Math.round(60 * h))} min` : h < 48 ? `${h.toFixed(1)} h` : `${(h / 24).toFixed(1)} d`;
 const agoFmt = (s) => { s = Math.max(0, Math.round(s)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s ago` : `${dur(s / 3600)} ago`; };
@@ -442,24 +436,28 @@ function spark(name, pts, epochs = [], ref = null) {
     <polyline class="line" points="${pts.map((p) => `${sx(p.x)},${sy(p.y)}`).join(" ")}"/>
   </svg>`;
 }
-// ---- BO run page: the trial log and the GP posterior over the search box (1 dim: curve, 2 dims: heatmaps)
+// ---- BO run page: the trial log and, for 1-dim searches, the GP posterior over the search box
 const sig = (z) => 1 / (1 + Math.exp(-z));
 const logit = (p) => Math.log(p / (1 - p));
 const fmtTheta = (v) => Number(v.toPrecision(3)).toString();
-const trialTip = (t) => `<b>trial ${t.trial}${t.baseline ? " · θ=0 replicate" : t.batch < (t.designBatches ?? 0) ? " · Sobol" : ""}</b><small>θ = (${t.theta.map(fmtTheta).join(", ")}) · pass rate ${pct(sig(t.value))}% (logit ${t.value.toFixed(2)} ± ${t.sem.toFixed(2)})</small>`;
-function renderBO1D(bo, ts, gp) {
+const trialTip = (t) => `<b>trial ${t.trial}${t.baseline ? " · θ=0 replicate" : t.design ? " · Sobol" : ""}</b><small>θ = (${t.theta.map(fmtTheta).join(", ")}) · pass rate ${pct(sig(t.value))}% (logit ${t.value.toFixed(2)} ± ${t.sem.toFixed(2)})</small>`;
+function renderBO1D(bo, ts, gp, zoom) {
   const W = 960, H = 360, M = { t: 16, r: 24, b: 48, l: 52 };
-  const xlo = -bo.range, xhi = bo.range;
-  // a fixed y range across frames so the slider only moves the data
-  const ys = bo.trials.flatMap((t) => [t.value - t.sem, t.value + t.sem]).concat((bo.gp?.frames ?? []).flatMap((f) => f.mean.flatMap((m, i) => [m - 2 * f.sd[i], m + 2 * f.sd[i]])));
-  const ylo = Math.min(...ys), yhi = Math.max(...ys);
-  const sx = (v) => M.l + (v - xlo) / (xhi - xlo) * (W - M.l - M.r), sy = (v) => M.t + (yhi - v) / (yhi - ylo) * (H - M.t - M.b);
-  // y is the logit objective, ticked in pass rate so the axis reads as accuracy
-  const yt = [0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98].filter((p) => logit(p) > ylo && logit(p) < yhi);
+  // the GP lives in logit space; mean, band and points are mapped through the sigmoid onto a linear pass-rate axis
+  const pad = (lo, hi, f = 0.08) => [lo - f * (hi - lo), hi + f * (hi - lo)];
+  // the window is ±range/2^zoom around θ=0; y fits what the window shows (this frame's band and its trials)
+  const xlo = -bo.range / 2 ** zoom, xhi = -xlo, inWindow = (x) => x >= xlo && x <= xhi;
+  const ys = ts.filter((t) => inWindow(t.theta[0])).flatMap((t) => [sig(t.value - t.sem), sig(t.value + t.sem)]).concat(gp ? gp.mean.flatMap((m, i) => inWindow(bo.gp.axis[i]) ? [sig(m - 2 * gp.sd[i]), sig(m + 2 * gp.sd[i])] : []) : []);
+  const [ylo, yhi] = zoom > 0 && ys.length ? pad(Math.min(...ys), Math.max(...ys)).map((v) => Math.min(1, Math.max(0, v))) : [0, 1];
+  const sx = (v) => M.l + (v - xlo) / (xhi - xlo) * (W - M.l - M.r), sy = (v) => M.t + (yhi - sig(v)) / (yhi - ylo) * (H - M.t - M.b);
+  const ystep = [0.01, 0.02, 0.05, 0.1].find((st) => (yhi - ylo) / st <= 10) ?? 0.1;
+  const yt = Array.from({ length: Math.floor(yhi / ystep + 1e-9) - Math.ceil(ylo / ystep - 1e-9) + 1 }, (_, i) => (Math.ceil(ylo / ystep - 1e-9) + i) * ystep);
   const xt = Array.from({ length: 5 }, (_, i) => xlo + (xhi - xlo) * i / 4);
   let g = `<g class="grid">${yt.map((p) => `<line x1="${M.l}" x2="${W - M.r}" y1="${sy(logit(p))}" y2="${sy(logit(p))}"/>`).join("")}</g>`;
   g += `<g class="axis"><path d="M${M.l},${M.t}V${H - M.b}H${W - M.r}"/>${yt.map((p) => `<text x="${M.l - 8}" y="${sy(logit(p)) + 4}" text-anchor="end">${Math.round(100 * p)}</text>`).join("")}${xt.map((v) => `<text x="${sx(v)}" y="${H - M.b + 16}" text-anchor="middle">${fmtTheta(v)}</text>`).join("")}`;
   g += `<text class="title" x="${(M.l + W - M.r) / 2}" y="${H - 8}" text-anchor="middle">θ</text><text class="title" transform="translate(14,${(M.t + H - M.b) / 2}) rotate(-90)" text-anchor="middle">train pass rate %</text></g>`;
+  // θ=0 is the untrained adapter: a vertical reference plus the mean of its replicates
+  g += `<line class="base" style="stroke:var(--muted)" x1="${sx(0)}" x2="${sx(0)}" y1="${M.t}" y2="${H - M.b}"/><text class="base-label" style="fill:var(--muted)" x="${sx(0) + 4}" y="${M.t + 10}">θ=0</text>`;
   const base = ts.filter((t) => t.baseline);
   if (base.length) { const b = base.reduce((a, t) => a + t.value, 0) / base.length; g += `<line class="base" style="stroke:var(--muted)" x1="${M.l}" x2="${W - M.r}" y1="${sy(b)}" y2="${sy(b)}"/><text class="base-label" style="fill:var(--muted)" x="${W - M.r - 4}" y="${sy(b) - 4}" text-anchor="end">θ=0 mean ${pct(sig(b))}</text>`; }
   if (gp) {
@@ -467,45 +465,29 @@ function renderBO1D(bo, ts, gp) {
     g += `<polygon class="band" style="fill:var(--accent)" points="${edge.join(" ")}"/><polyline class="curve" style="stroke:var(--accent)" points="${bo.gp.axis.map((x, i) => `${sx(x)},${sy(gp.mean[i])}`).join(" ")}"/>`;
   }
   g += `<g class="ebar">${ts.map((t) => `<line x1="${sx(t.theta[0])}" x2="${sx(t.theta[0])}" y1="${sy(t.value - t.sem)}" y2="${sy(t.value + t.sem)}"/>`).join("")}</g>`;
-  g += ts.map((t) => `<circle class="pt ${t.guided ? "" : "design"}" r="3.5" cx="${sx(t.theta[0])}" cy="${sy(t.value)}" tabindex="0" style="${t.guided ? "fill:var(--accent)" : ""}" data-tip="${esc(trialTip(t))}"/>`).join("");
+  g += ts.map((t) => `<circle class="pt ${t.design ? "design" : ""}" r="3.5" cx="${sx(t.theta[0])}" cy="${sy(t.value)}" tabindex="0" style="${t.design ? "" : "fill:var(--accent)"}" data-tip="${esc(trialTip(t))}"/>`).join("");
   if (gp) { const p = ts[gp.pick]; g += `<circle class="pick" r="7" cx="${sx(p.theta[0])}" cy="${sy(p.value)}"/>`; }
-  return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="objective versus θ">${g}</svg><div class="tip" hidden></div></div>`;
+  return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="pass rate versus θ">${g}</svg><div class="tip" hidden></div></div>`;
 }
-function renderBO2D(bo, ts, gp) {
-  const axis = bo.gp?.axis ?? [], n = axis.length, S = 460, M = { t: 10, r: 24, b: 40, l: 56 }, side = S - M.l - M.r;
-  const lo = -bo.range, hi = bo.range;
-  const sx = (v) => M.l + (v - lo) / (hi - lo) * side, sy = (v) => M.t + (hi - v) / (hi - lo) * side;
-  const xt = [lo, 0, hi];
-  const axes = `<g class="axis"><path d="M${M.l},${M.t}V${M.t + side}H${M.l + side}"/>${xt.map((v) => `<text x="${sx(v)}" y="${M.t + side + 14}" text-anchor="middle">${fmtTheta(v)}</text><text x="${M.l - 6}" y="${sy(v) + 4}" text-anchor="end">${fmtTheta(v)}</text>`).join("")}<text class="title" x="${M.l + side / 2}" y="${M.t + side + 32}" text-anchor="middle">θ₁</text><text class="title" transform="translate(12,${M.t + side / 2}) rotate(-90)" text-anchor="middle">θ₂</text></g>`;
-  // colour scales span every frame so a step's surface is comparable with the next
-  const heat = (name, key, fmt, showPts) => {
-    const vals = gp[key], all = bo.gp.frames.flatMap((f) => f[key]), vlo = Math.min(...all), vhi = Math.max(...all), cell = side / n, shade = (v) => `color-mix(in oklab, var(--accent) ${Math.round(100 * (v - vlo) / (vhi - vlo || 1))}%, var(--surface))`;
-    const cells = vals.map((v, i) => { const x = axis[Math.floor(i / n)], y = axis[i % n]; return `<rect class="cell pt" x="${sx(x) - cell / 2}" y="${sy(y) - cell / 2}" width="${cell + 0.5}" height="${cell + 0.5}" style="fill:${shade(v)}" data-tip="${esc(`<b>${name}</b><small>θ = (${fmtTheta(x)}, ${fmtTheta(y)}) · ${fmt(v)}</small>`)}"/>`; }).join("");
-    const pts = showPts ? ts.map((t) => `<circle class="pt ${t.guided ? "" : "design"}" r="3.5" cx="${sx(t.theta[0])}" cy="${sy(t.theta[1])}" tabindex="0" style="${t.guided ? "fill:var(--ink)" : ""}" data-tip="${esc(trialTip(t))}"/>`).join("") : "";
-    const pick = showPts && gp ? `<circle class="pick" r="6" cx="${sx(ts[gp.pick].theta[0])}" cy="${sy(ts[gp.pick].theta[1])}"/>` : "";
-    return `<div class="multiple"><div class="head"><b>${esc(name)}</b></div><div class="chart-wrap"><svg viewBox="0 0 ${S} ${S}" role="img" aria-label="${esc(name)} over θ">${cells}${axes}${pts}${pick}</svg><div class="tip" hidden></div></div><div class="ramp"></div><div class="ramp-ends"><span>${fmt(vlo)}</span><span>${fmt(vhi)}</span></div></div>`;
-  };
-  if (!gp) return `<div class="placeholder">GP posterior not available yet.</div>`;
-  return `<div class="heat">${heat("posterior mean · pass rate %", "mean", (v) => `${pct(sig(v))}%`, true)}${heat("posterior sd · logit", "sd", (v) => v.toFixed(3), false)}</div>`;
-}
-// the surface after GP-guided step `frames[i].step`: the trials seen so far and the GP fitted on them
-function renderBOFrame(bo, i) {
-  const dim = bo.trials[0].theta.length, gp = bo.gp?.frames[i], ts = gp ? bo.trials.slice(0, gp.k) : bo.trials;
+// the surface after GP-guided step `frames[i].step`: the trials seen so far and the GP fitted on them, in a ±range/2^zoom window
+function renderBOFrame(bo, i, zoom = 0) {
+  const gp = bo.gp?.frames[i], ts = gp ? bo.trials.slice(0, gp.k) : bo.trials;
   const pick = gp ? ts[gp.pick] : null;
   const head = gp ? `after GP-guided step ${gp.step} · ${ts.length} trials · pick trial ${pick.trial}, θ = (${pick.theta.map(fmtTheta).join(", ")}) at ${pct(sig(bo.trials[pick.trial].value))}%` : "GP posterior still fitting, the page reloads when it lands";
-  return `<div class="bo-head mono">${esc(head)}</div>${dim === 1 ? renderBO1D(bo, ts, gp) : dim === 2 ? renderBO2D(bo, ts, gp) : ""}`;
+  return `<div class="bo-head mono">${esc(head)} · window ±${fmtTheta(bo.range / 2 ** zoom)}</div>${renderBO1D(bo, ts, gp, zoom)}`;
 }
 function renderBOSection(r) {
   const bo = r.bo, dim = bo.trials[0].theta.length;
-  for (const t of bo.trials) { t.designBatches = bo.design; t.guided = t.batch >= bo.design; }
   const base = bo.trials.filter((t) => t.baseline), baseMean = base.length ? base.reduce((a, t) => a + t.value, 0) / base.length : null;
   const byTrial = bo.trials.map((t) => ({ x: t.trial, y: 100 * sig(t.value) }));
   const best = []; let b = -Infinity; for (const t of bo.trials) { b = Math.max(b, t.value); best.push({ x: t.trial, y: 100 * sig(b) }); }
   const convergence = `<div class="multiples"><div class="multiple"><div class="head"><b>observed pass rate by trial</b><span class="mono">${bo.trials.length} trials</span></div>${spark("pass rate", byTrial, [], baseMean == null ? null : 100 * sig(baseMean))}</div><div class="multiple"><div class="head"><b>best observed so far</b><span class="mono">${best[best.length - 1].y.toFixed(1)}</span></div>${spark("best", best, [], baseMean == null ? null : 100 * sig(baseMean))}</div></div>`;
   const frames = bo.gp?.frames ?? [], last = frames.length - 1;
   // the slider walks the snapshot steps (GP-guided batch 1, 2, 4, ... and the newest); a frame is redrawn on input
-  const slider = frames.length > 1 ? `<div class="bo-slider"><span class="eyebrow">step</span><input type="range" min="0" max="${last}" value="${last}" data-bo="${esc(r.id)}"><span class="ticks">${frames.map((f) => `<span>${f.step}</span>`).join("")}</span></div>` : "";
-  return `<div class="multiples-group"><div class="eyebrow">Search · ${dim} parameter${dim > 1 ? "s" : ""} in ±${fmtTheta(bo.range)}${dim === 1 ? " · GP band ±2 sd" : ""} · ring = pick (highest posterior mean) · hollow points are the initial design</div>${slider}<div class="bo-frame">${dim <= 2 ? renderBOFrame(bo, last) : ""}</div>${convergence}</div>`;
+  const slider = frames.length > 1 ? `<div class="bo-slider"><span class="eyebrow">step</span><input type="range" min="0" max="${last}" value="${last}" data-bo="${esc(r.id)}" data-bo-step><span class="ticks">${frames.map((f) => `<span>${f.step}</span>`).join("")}</span></div>` : "";
+  // zoom halves the θ window around 0 per stop, from the whole search box down to ±range/64
+  const zoom = dim === 1 ? `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="6" step="0.5" value="0" data-bo="${esc(r.id)}" data-bo-zoom></div>` : "";
+  return `<div class="multiples-group"><div class="eyebrow">Search · ${dim} parameter${dim > 1 ? "s" : ""} in ±${fmtTheta(bo.range)}${dim === 1 ? " · GP band ±2 sd · ring = pick (highest posterior mean) · hollow points are the initial design" : ""}</div>${slider}${zoom}<div class="bo-frame">${dim === 1 ? renderBOFrame(bo, last) : ""}</div>${convergence}</div>`;
 }
 function renderRun(id) {
   const r = DATA.runs[id], tab = currentTab();
@@ -538,7 +520,7 @@ function renderRun(id) {
       <h2 class="mono" style="font-family:'IBM Plex Mono',monospace;font-size:16px">${esc(id)}</h2>
       <div class="chips">${meta}</div>
       ${r.bo ? renderBOSection({ ...r, id }) : ""}
-      ${multiples || (r.bo ? "" : `<div class="placeholder">No training curves: no <code>checkpoint-*/trainer_state.json</code> in the run dir.</div>`)}
+      ${multiples || (r.bo ? "" : `<div class="placeholder">No training curves yet.</div>`)}
     </div>
     ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>sbatch slurm/eval_sweep.sh</code></div>`}`;
 }
@@ -574,7 +556,7 @@ document.addEventListener("click", (e) => {
   const grp = e.target.closest("tr.grp"); if (grp) { const k = grp.dataset.key; state.expanded.has(k) ? state.expanded.delete(k) : state.expanded.add(k); return render(); }
   const pt = e.target.closest(".pt"); if (pt && pt.dataset.run) { location.hash = runHref(pt.dataset.run); return; }
 });
-document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-bo]")) $(".bo-frame").innerHTML = renderBOFrame(DATA.runs[e.target.dataset.bo].bo, +e.target.value); });
+document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-bo]")) { const bo = DATA.runs[e.target.dataset.bo].bo; $(".bo-frame").innerHTML = renderBOFrame(bo, +($("input[data-bo-step]")?.value ?? (bo.gp?.frames.length ?? 1) - 1), +($("input[data-bo-zoom]")?.value ?? 0)); } });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDrawer();
   if (e.key === "Enter" && e.target.matches(".pt") && e.target.dataset.run) location.hash = runHref(e.target.dataset.run);
