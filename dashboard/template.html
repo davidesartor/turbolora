@@ -204,9 +204,9 @@ const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Mat
 const color = (i) => PALETTE[i % PALETTE.length];
 
 // ---- state: view + x axis persist per viewer, tab lives in the hash, hidden/expanded last the session
-const state = { view: "dataset", x: "params", train: "all", obj: "greedy", hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
+const state = { view: "dataset", x: "params", train: "all", obj: "greedy", pairBatch: 1, pairZoom: 0, hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("turbolora-curves") ?? "{}"), { hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() }); } catch {}
-const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj })); } catch {} };
+const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj, pairBatch: state.pairBatch })); } catch {} };
 // models with no training runs start hidden in the chart; the legend brings them back
 const modelsWithRuns = new Set(runs.map(([, r]) => r.model));
 for (const m of models) if (!modelsWithRuns.has(m)) state.hidden.add(modelLabel(m));
@@ -249,6 +249,7 @@ function renderControls() {
 $("#view").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.view = b.dataset.v; persist(); location.hash = ""; render(); });
 $("#train").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.train = b.dataset.t; persist(); render(); });
 $("#obj").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.obj = b.dataset.o; persist(); render(); });
+document.addEventListener("click", (e) => { const b = e.target.closest("#pair-batch button"); if (!b) return; state.pairBatch = +b.dataset.b; persist(); render(); });
 $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.x = b.dataset.x; persist(); render(); });
 window.addEventListener("hashchange", render);
 
@@ -386,6 +387,53 @@ function renderTable(series) {
   return `<div class="scroll"><table><thead><tr><th>Series</th><th>Run</th><th>Params</th><th>Train time</th><th>Peak VRAM</th><th>Accuracy</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${out.join("")}</tbody></table></div>`;
 }
 
+// ---- seed-matched search vs GRPO: a BO/TuRBO run's `bases` names the GRPO export it searched from, so the pair shares model, u, seed and train set
+const batchOf = (r) => r.batch ?? 1;
+function pairedSearch(task, batch) {
+  const byDir = new Map(runs.map(([id, r]) => [id, r]));
+  return runs.flatMap(([id, r]) => {
+    if (!r.bases || !r.tasks[task] || !trainOk(r) || state.hidden.has(modelLabel(r.model)) || (batch != null && batchOf(r) !== batch)) return [];
+    const grpoId = r.bases.replace(/^outputs\//, "").split("/snapshots/")[0], g = byDir.get(grpoId);
+    const base = DATA.models[r.model]?.tasks[task]?.accuracy;
+    return g?.tasks[task] && base != null ? [{ id, run: r, grpo: g, grpoId, x: 100 * (g.tasks[task].accuracy - base), y: 100 * (r.tasks[task].accuracy - base), task }] : [];
+  });
+}
+function renderPaired(task) {
+  // the batch toggle picks which TuRBO variant to pair: batch 1 (one θ per vLLM call) or the batched searches
+  const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => a - b);
+  if (!batches.length) return "";
+  if (!batches.includes(state.pairBatch)) state.pairBatch = batches[0];
+  const all = pairedSearch(task, state.pairBatch);
+  const toggle = `<div class="control"><span class="eyebrow">TuRBO batch</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
+  const above = all.filter((p) => p.y > p.x).length, med = median(all.map((p) => p.y - p.x));
+  const seen = [...new Set(all.map((p) => p.run.model))], legend = seen.map((m) => `<button type="button" data-series="${esc(modelLabel(m))}" style="--c:${modelColor(m)}"><span class="swatch"></span>${esc(modelLabel(m))}<span class="mono" style="color:var(--muted)">${all.filter((p) => p.run.model === m).length}</span></button>`).join("");
+  const zoom = `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="4" step="0.5" value="${state.pairZoom}" data-pair-zoom></div>`;
+  return `<div class="panel" style="margin-top:20px"><div class="panel-head"><h2>Search vs GRPO <span class="mono" style="font-weight:400;color:var(--muted);font-size:14px">${all.length} seed-matched TinyLoRA pairs · search above GRPO in ${above} · median ${signed(med)} pt</span></h2><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div class="legend">${legend}</div>${toggle}</div></div><p style="margin:0 0 8px;color:var(--muted);font-size:13px">Each point is a BO/TuRBO search against the GRPO run whose adapter it searched from: same model, u, seed and train set. Both axes are the gain over the untrained base model in points; the dashed line is parity.</p>${zoom}<div class="chart-wrap" id="paired-chart" style="max-width:520px;margin:0 auto">${renderPairedChart(all, state.pairZoom)}</div></div>`;
+}
+// zoom halves the window per stop around the median pair, so the crowd near parity opens up while outliers leave the frame
+function renderPairedChart(all, zoom) {
+  // square plot area: x and y are the same accuracy, so parity must sit at 45°
+  const W = 520, H = 520, M = { t: 16, r: 24, b: 48, l: 52 };
+  // Δ vs the untrained base in points; 0 (the base itself) is always in the unzoomed view
+  const vs = [0, ...all.flatMap((p) => [p.x, p.y])], full = Math.max(Math.max(...vs) - Math.min(...vs), 5);
+  const c = zoom > 0 ? median(vs.slice(1)) : (Math.max(...vs) + Math.min(...vs)) / 2, half = 0.6 * full / 2 ** zoom;
+  const step = [0.5, 1, 2, 5, 10, 20].find((st) => 2 * half / st <= 8) ?? 20;
+  const lo = Math.floor((c - half) / step) * step, hi = Math.ceil((c + half) / step) * step;
+  const pts = all.filter((p) => p.x >= lo && p.x <= hi && p.y >= lo && p.y <= hi);
+  const sx = (v) => M.l + (v - lo) / (hi - lo) * (W - M.l - M.r), sy = (v) => M.t + (hi - v) / (hi - lo) * (H - M.t - M.b);
+  const ticks = Array.from({ length: Math.round((hi - lo) / step) + 1 }, (_, i) => lo + i * step);
+  let g = `<g class="grid">${ticks.map((t) => `<line x1="${M.l}" x2="${W - M.r}" y1="${sy(t)}" y2="${sy(t)}"/><line x1="${sx(t)}" x2="${sx(t)}" y1="${M.t}" y2="${H - M.b}"/>`).join("")}</g>`;
+  g += `<g class="axis"><path d="M${M.l},${M.t}V${H - M.b}H${W - M.r}"/>${ticks.map((t) => `<text x="${M.l - 8}" y="${sy(t) + 4}" text-anchor="end">${signed(t)}</text><text x="${sx(t)}" y="${H - M.b + 16}" text-anchor="middle">${signed(t)}</text>`).join("")}`;
+  g += `<text class="title" x="${(M.l + W - M.r) / 2}" y="${H - 8}" text-anchor="middle">GRPO Δ base (pt)</text><text class="title" transform="translate(14,${(M.t + H - M.b) / 2}) rotate(-90)" text-anchor="middle">search Δ base (pt)</text></g>`;
+  g += `<line class="base" style="stroke:var(--muted)" x1="${sx(lo)}" y1="${sy(lo)}" x2="${sx(hi)}" y2="${sy(hi)}"/>`;
+  if (lo < 0 && hi > 0) g += `<line class="axis" style="stroke:var(--line)" x1="${sx(0)}" x2="${sx(0)}" y1="${M.t}" y2="${H - M.b}"/><line style="stroke:var(--line)" x1="${M.l}" x2="${W - M.r}" y1="${sy(0)}" y2="${sy(0)}"/>`;
+  // one pair per GRPO seed: the same GRPO run can anchor several searches (BO, TuRBO, batched), joined by a faint vertical stem
+  for (const [grpoId, group] of Map.groupBy(pts, (p) => p.grpoId)) if (group.length > 1) g += `<line class="base" style="stroke:${modelColor(group[0].run.model)};opacity:0.35" x1="${sx(group[0].x)}" x2="${sx(group[0].x)}" y1="${sy(Math.min(...group.map((p) => p.y)))}" y2="${sy(Math.max(...group.map((p) => p.y)))}"/>`;
+  g += pts.map((p) => { const d = p.y - p.x, tip = `<b>${esc(p.id.split("/").slice(-2).join("/"))}</b><small>${esc(modelLabel(p.run.model))} · u=${p.run.proj_dim} · seed ${p.run.seed} · ${ADAPTER[p.run.adapter] ?? p.run.adapter}${p.run.batch ? ` (batch ${p.run.batch})` : ""}<br>search ${signed(p.y)} vs GRPO ${signed(p.x)} pt over base · ${signed(d)}</small>`; return `${mark(p.run.adapter, sx(p.x), sy(p.y))} class="pt" tabindex="0" style="fill:${modelColor(p.run.model)}" data-run="${esc(p.id)}" data-tip="${esc(tip)}"/>`; }).join("");
+  if (pts.length < all.length) g += `<text class="note" x="${W - M.r - 4}" y="${M.t + 14}" text-anchor="end">${all.length - pts.length} outside window</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="search gain versus GRPO gain">${g}</svg><div class="tip" hidden></div>`;
+}
+
 function render() {
   renderControls();
   closeDrawer();
@@ -400,6 +448,7 @@ function render() {
       <div class="panel-head"><h2>${title}</h2>${renderLegend(series)}</div>
       <div class="chart-wrap">${renderChart(series)}</div>
     </div>
+    ${state.view === "dataset" ? renderPaired(tab) : ""}
     ${renderTable(series)}`;
 }
 
@@ -454,8 +503,8 @@ function renderBO1D(bo, ts, gp, zoom) {
   const W = 960, H = 360, M = { t: 16, r: 24, b: 48, l: 52 };
   // the GP lives in logit space; mean, band and points are mapped through the sigmoid onto a linear pass-rate axis
   const pad = (lo, hi, f = 0.08) => [lo - f * (hi - lo), hi + f * (hi - lo)];
-  // the window is ±range/2^zoom around θ=0; y fits what the window shows (this frame's band and its trials)
-  const xlo = -bo.range / 2 ** zoom, xhi = -xlo, inWindow = (x) => x >= xlo && x <= xhi;
+  // the window is ±range/2^zoom around the midpoint of θ=0 and the frame's pick, so both stay in view while zooming; y fits what the window shows
+  const center = zoomCenter(ts, gp), half = bo.range / 2 ** zoom, xlo = center - half, xhi = center + half, inWindow = (x) => x >= xlo && x <= xhi;
   const ys = ts.filter((t) => inWindow(t.theta[0])).flatMap((t) => [sig(t.value - t.sem), sig(t.value + t.sem)]).concat(gp ? gp.mean.flatMap((m, i) => inWindow(bo.gp.axis[i]) ? [sig(m - 2 * gp.sd[i]), sig(m + 2 * gp.sd[i])] : []) : []);
   const [ylo, yhi] = zoom > 0 && ys.length ? pad(Math.min(...ys), Math.max(...ys)).map((v) => Math.min(1, Math.max(0, v))) : [0, 1];
   const sx = (v) => M.l + (v - xlo) / (xhi - xlo) * (W - M.l - M.r), sy = (v) => M.t + (yhi - sig(v)) / (yhi - ylo) * (H - M.t - M.b);
@@ -478,12 +527,13 @@ function renderBO1D(bo, ts, gp, zoom) {
   if (gp) { const p = ts[gp.pick]; g += `<circle class="pick" r="7" cx="${sx(p.theta[0])}" cy="${sy(p.value)}"/>`; }
   return `<div class="chart-wrap"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="pass rate versus θ">${g}</svg><div class="tip" hidden></div></div>`;
 }
+const zoomCenter = (ts, gp) => gp ? ts[gp.pick].theta[0] / 2 : 0;
 // the surface after GP-guided step `frames[i].step`: the trials seen so far and the GP fitted on them, in a ±range/2^zoom window
 function renderBOFrame(bo, i, zoom = 0) {
   const gp = bo.gp?.frames[i], ts = gp ? bo.trials.slice(0, gp.k) : bo.trials;
   const pick = gp ? ts[gp.pick] : null;
   const head = gp ? `after GP-guided step ${gp.step} · ${ts.length} trials · pick trial ${pick.trial}, θ = (${pick.theta.map(fmtTheta).join(", ")}) at ${pct(sig(bo.trials[pick.trial].value))}%` : "GP posterior still fitting, the page reloads when it lands";
-  return `<div class="bo-head mono">${esc(head)} · window ±${fmtTheta(bo.range / 2 ** zoom)}</div>${renderBO1D(bo, ts, gp, zoom)}`;
+  return `<div class="bo-head mono">${esc(head)} · window ${fmtTheta(zoomCenter(ts, gp))} ± ${fmtTheta(bo.range / 2 ** zoom)}</div>${renderBO1D(bo, ts, gp, zoom)}`;
 }
 function renderBOSection(r) {
   const bo = r.bo, dim = bo.trials[0].theta.length;
@@ -494,7 +544,7 @@ function renderBOSection(r) {
   const frames = bo.gp?.frames ?? [], last = frames.length - 1;
   // the slider walks the snapshot steps (GP-guided batch 1, 2, 4, ... and the newest); a frame is redrawn on input
   const slider = frames.length > 1 ? `<div class="bo-slider"><span class="eyebrow">step</span><input type="range" min="0" max="${last}" value="${last}" data-bo="${esc(r.id)}" data-bo-step><span class="ticks">${frames.map((f) => `<span>${f.step}</span>`).join("")}</span></div>` : "";
-  // zoom halves the θ window around 0 per stop, from the whole search box down to ±range/64
+  // zoom halves the θ window around the 0–pick midpoint per stop, from the whole search box down to ±range/64
   const zoom = dim === 1 ? `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="6" step="0.5" value="0" data-bo="${esc(r.id)}" data-bo-zoom></div>` : "";
   return `<div class="multiples-group"><div class="eyebrow">Search · ${dim} parameter${dim > 1 ? "s" : ""} in ±${fmtTheta(bo.range)}${dim === 1 ? " · GP band ±2 sd · ring = pick (highest posterior mean) · hollow points are the initial design" : ""}</div>${slider}${zoom}<div class="bo-frame">${dim === 1 ? renderBOFrame(bo, last) : ""}</div>${convergence}</div>`;
 }
@@ -566,7 +616,7 @@ document.addEventListener("click", (e) => {
   const grp = e.target.closest("tr.grp"); if (grp) { const k = grp.dataset.key; state.expanded.has(k) ? state.expanded.delete(k) : state.expanded.add(k); return render(); }
   const pt = e.target.closest(".pt"); if (pt && pt.dataset.run) { location.hash = runHref(pt.dataset.run); return; }
 });
-document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-bo]")) { const bo = DATA.runs[e.target.dataset.bo].bo; $(".bo-frame").innerHTML = renderBOFrame(bo, +($("input[data-bo-step]")?.value ?? (bo.gp?.frames.length ?? 1) - 1), +($("input[data-bo-zoom]")?.value ?? 0)); } });
+document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-pair-zoom]")) { state.pairZoom = +e.target.value; $("#paired-chart").innerHTML = renderPairedChart(pairedSearch(currentTab(), state.pairBatch), state.pairZoom); return; } if (e.target.matches?.("input[data-bo]")) { const bo = DATA.runs[e.target.dataset.bo].bo; $(".bo-frame").innerHTML = renderBOFrame(bo, +($("input[data-bo-step]")?.value ?? (bo.gp?.frames.length ?? 1) - 1), +($("input[data-bo-zoom]")?.value ?? 0)); } });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDrawer();
   if (e.key === "Enter" && e.target.matches(".pt") && e.target.dataset.run) location.hash = runHref(e.target.dataset.run);
