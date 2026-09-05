@@ -1,6 +1,6 @@
 #!/bin/bash -l
-# Seed array for a PunyLoRA (Binomial BO) run. Usage: MODEL=qwen2.5-1.5b TASK=easy [CFG=u1] sbatch slurm/puny_lora.sh [--n-questions 4 --k-rollouts 1 ...]
-# CFG names the run dir (punylora[-<cfg>]). Any bf16 card works: 1.5B fits 16G, 7B needs L4/A40+; on small cards lower --batch·--n-questions·--k-rollouts (completions per vLLM call)
+# Seed array for a PunyLoRA (Binomial BO) run. Usage: MODEL=qwen2.5-1.5b TASK=easy [CFG=u1] sbatch slurm/puny_lora.sh [--batch 1 --k-rollouts 1 ...]
+# CFG names the run dir (punylora[-<cfg>]). Any bf16 card works: 1.5B fits 16G, 7B needs L4/A40+; completions per vLLM call = one GRPO step, split over --batch θ's × prompts × --k-rollouts
 #SBATCH -J puny_lora
 #SBATCH -a 0-2
 #SBATCH -p gpu,gpu-preempt

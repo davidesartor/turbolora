@@ -52,9 +52,13 @@ class LoRA(Adapter):
 
 
 def svd_lora_layers(
-    model, rank: int, seed: int
+    model, rank: int, seed: int, bases: dict[str, Tensor] | None = None
 ) -> tuple[nn.Module, list[tuple[LoraLayer, Tensor, Tensor, Tensor]]]:
-    """PEFT-wrap `model` and return each adapted module with the top-`rank` SVD (U, S, Vᵀ) of its frozen weight."""
+    """PEFT-wrap `model` and return each adapted module with the top-`rank` SVD (U, S, Vᵀ) of its frozen weight.
+
+    `bases` (lora_A tensors of an exported run, by state_dict key) fixes Vᵀ to that run's, so the search space is
+    the same one it trained in: SVD signs differ between the cluster's solvers, and UΣ = W·V follows from Vᵀ alone.
+    """
     model = FastLanguageModel.get_peft_model(
         model,
         r=rank,
@@ -64,10 +68,19 @@ def svd_lora_layers(
         use_gradient_checkpointing="unsloth",
         random_state=seed,
     )
-    layers = [m for m in model.modules() if isinstance(m, LoraLayer)]
+    layers = [(n, m) for n, m in model.named_modules() if isinstance(m, LoraLayer)]
     svds = []
-    for layer in layers:
-        U, S, Vh = torch.linalg.svd(layer.weight.float(), full_matrices=False)
+    for name, layer in layers:
+        W = layer.weight.float()
+        if bases is not None:
+            if f"{name}.lora_A.weight" not in bases:
+                raise KeyError(f"reference export has no lora_A for {name}: not an export of this adapter/model")
+            Vh = bases[f"{name}.lora_A.weight"].to(W).float()
+            US = W @ Vh.T
+            S = US.norm(dim=0)
+            svds.append((layer, US / S, S, Vh))
+            continue
+        U, S, Vh = torch.linalg.svd(W, full_matrices=False)
         # clone: slices are views that would pin every module's full fp32 factors (~35 GB on a 7B)
         svds.append((layer, U[:, :rank].clone(), S[:rank].clone(), Vh[:rank].clone()))
     return model, svds
@@ -112,8 +125,8 @@ class LoRAXS(Adapter):
     """
 
     @staticmethod
-    def attach(model, rank: int, seed: int, **kwargs) -> nn.Module:
-        model, svds = svd_lora_layers(model, rank, seed)
+    def attach(model, rank: int, seed: int, bases: dict[str, Tensor] | None = None, **kwargs) -> nn.Module:
+        model, svds = svd_lora_layers(model, rank, seed, bases)
         for layer, U, S, Vh in svds:
             lora_a = cast(nn.Linear, layer.lora_A["default"])
             lora_a.weight.data.copy_(Vh)
@@ -179,9 +192,9 @@ class TinyLoRA(Adapter):
 
     @staticmethod
     def attach(
-        model, rank: int, seed: int, proj_dim: int = 1, tie: int = 1, **kwargs
+        model, rank: int, seed: int, proj_dim: int = 1, tie: int = 1, bases: dict[str, Tensor] | None = None, **kwargs
     ) -> nn.Module:
-        model, svds = svd_lora_layers(model, rank, seed)
+        model, svds = svd_lora_layers(model, rank, seed, bases)
         generator = torch.Generator().manual_seed(seed)
         device = svds[0][0].weight.device
         tie = tie or len(svds)  # 0 = one global v

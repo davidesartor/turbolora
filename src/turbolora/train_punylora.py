@@ -19,7 +19,7 @@ from turbolora import grpo, puny_lora
 from turbolora.adapters import Adapter, TinyLoRA
 from turbolora.models import MODELS
 from turbolora.tasks import TASKS, extract, grade
-from turbolora.train_bo import grpo_budget_trials, max_grpo_displacement
+from turbolora.train_bo import grpo_bases, grpo_steps, max_grpo_displacement, questions_per_theta
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -31,8 +31,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank", type=int, default=2, help="frozen truncated-SVD rank")
     parser.add_argument("--proj-dim", type=int, default=1, help="u: entries per v")
     parser.add_argument("--untie", action="store_true", help="one v per module, θ ∈ ℝ^{u·modules} (default: one global v)")
-    # objective: hits over a fresh random train subset; n_questions · k_rollouts completions per vLLM call, split over --batch θ's
-    parser.add_argument("--n-questions", type=int, default=16, help="prompts per objective call, shared by the batch")
+    # objective: hits over a fresh random train subset; one GRPO step of completions per vLLM call, allocated as (--batch θ's, prompts each, --k-rollouts each)
     parser.add_argument("--k-rollouts", type=int, default=1, help="completions per prompt")
     parser.add_argument("--vllm-share", type=float, default=0.85, help="gpu_memory_utilization; no training state, so the card is vLLM's")
     parser.add_argument("--no-eval", action="store_true", help="snapshot the pick only, skip its evals")
@@ -49,6 +48,8 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
     spec = MODELS[args.model]
     start = time.time()
 
+    bases_path, bases = grpo_bases(args)
+    print(f"SVD bases from {bases_path}")
     model, tokenizer = grpo.load_model(
         spec,
         adapter,
@@ -59,6 +60,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         max_loras=args.batch,
         proj_dim=args.proj_dim,
         tie=1 if args.untie else 0,
+        bases=bases,
     )
     vs = [p for p in model.parameters() if p.requires_grad]  # the distinct v's, module order
     dim = sum(v.numel() for v in vs)
@@ -75,8 +77,8 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         args.theta_range = max_grpo_displacement(len(dataset), args.rank, args.proj_dim)
         print(f"theta range ±{args.theta_range:.4f} (GRPO max displacement)")
     if args.n_evals is None:
-        args.n_evals = grpo_budget_trials(len(dataset), args.n_questions, args.k_rollouts)
-        print(f"n_evals {args.n_evals} batches (GRPO completion budget)")
+        args.n_evals = grpo_steps(len(dataset))
+        print(f"n_evals {args.n_evals} batches (one GRPO step of completions each)")
 
     # config half of run.json goes out before the search so the dashboard can show the run while it runs
     config = dict(
@@ -95,9 +97,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
         gpu=torch.cuda.get_device_name(0),
     )
     (out / "run.json").write_text(json.dumps(config, indent=1))
-    if args.n_questions % args.batch:
-        raise ValueError("n_questions must be a multiple of batch")
-    questions_per_theta = args.n_questions // args.batch
+    n_questions = questions_per_theta(args.batch, args.k_rollouts)
 
     def objective(thetas: Float[Tensor, "B T"], batch: int) -> list[tuple[int, int]]:
         """Hits and completions per θ: one LoRA per θ, every θ's prompts in a single vLLM call."""
@@ -107,10 +107,10 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
             vector_to_parameters(theta.to(vs[0]), vs)  # θ = every v concatenated
             # a fresh-id LoRARequest holding this θ's materialized lora_B (the state_dict hook builds a new tensor)
             request = model.load_lora(str(candidate_dir), load_tensors=True)
-            subset = dataset.select(rng.choice(len(dataset), questions_per_theta, replace=False))
+            subset = dataset.select(rng.choice(len(dataset), n_questions, replace=False))
             prompts += [spec.prompt(q) for q in subset["question"]]
             answers += subset["answer"]
-            requests += [request] * questions_per_theta
+            requests += [request] * n_questions
         outputs = model.fast_generate(
             prompts,
             lora_request=requests,
@@ -124,8 +124,8 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA) -> None:
             ),
         )
         hits = np.array([sum(grade(extract(o.text), a) for o in r.outputs) for r, a in zip(outputs, answers)])
-        per_theta = hits.reshape(len(thetas), questions_per_theta).sum(1)
-        return [(int(h), questions_per_theta * args.k_rollouts) for h in per_theta]
+        per_theta = hits.reshape(len(thetas), n_questions).sum(1)
+        return [(int(h), n_questions * args.k_rollouts) for h in per_theta]
 
     last_snapshot: dict = {}
 
