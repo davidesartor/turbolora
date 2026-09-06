@@ -55,11 +55,12 @@ diverged. Since all these adapters share the same frozen U, Σ, Vᵀ, equal ‖�
 
 | models | task | `lora` r | `loraxs` r | `tinylora` r2, tied, u |
 |---|---|---|---|---|
-| Qwen2.5-1.5B | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 4, 16, 64, 256, 1024 |
-| Qwen2.5-1.5B-Instruct | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1 |
-| Qwen2.5-1.5B-Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 64, 256 |
-| Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 4, 16, 64, 256, 1024 |
+| Qwen2.5-1.5B | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
+| Qwen2.5-1.5B-Instruct, -Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
+| Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
 | Qwen2.5-3B | hard | — | 1, 2 | 1, 4, 16, 32 |
+
+Early `tinylora` u1024 extras (1.5B done, 7B partial) were moved to `tmp/u1024-runs/` on 2026-09-06; not part of the grid.
 
 Not yet launched for 3B: `lora` r1/2/8/32, `loraxs` r8/32 and `tinylora` u256 (held back on 2026-09-03 to save GPU hours).
 
