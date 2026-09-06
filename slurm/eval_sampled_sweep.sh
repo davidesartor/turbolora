@@ -1,15 +1,15 @@
 #!/bin/bash -l
 # Sampled (4 completions, T=1, GRPO's rollout setting) six-task eval of every finished run's last snapshot plus each base model,
-# one base model per job on a single engine load, resubmitting itself until nothing is pending (short QOS allows one queued job).
-# Usage: sbatch slurm/eval_sampled_sweep.sh
+# one base model per job on a single engine load, resubmitting itself until nothing is pending.
+# Usage: sbatch slurm/eval_sampled_sweep.sh (all models, one per hop) or MODEL=qwen2.5-7b sbatch ... (that model only; one job per model runs in parallel)
 #SBATCH -J eval-sampled
 #SBATCH -p gpu,gpu-preempt
-#SBATCH -q short
+#SBATCH -q normal
 #SBATCH --gpus=1
 #SBATCH --constraint=l40s|a100-40g|a100-80g|h100
 #SBATCH -c 8
 #SBATCH --mem=60G
-#SBATCH -t 04:00:00
+#SBATCH -t 12:00:00
 #SBATCH -o .slurm-logs/%x-%j.out
 
 set -e
@@ -29,7 +29,7 @@ complete() { [ "$(ls "$1"/*@$SAMPLES.json.gz 2>/dev/null | wc -l)" -ge 6 ]; }
 
 # last snapshot of every finished run (run.json carries train_hours) that still lacks any sampled task
 pending() {
-  grep -l train_hours outputs/runs/*/*/*/seed*/run.json | sort | while read -r r; do
+  grep -l train_hours outputs/runs/${MODEL:-*}/*/*/seed*/run.json | sort | while read -r r; do
     last=$(ls -d "$(dirname "$r")"/snapshots/step-* 2>/dev/null | sort | tail -1)
     [ -n "$last" ] && [ -f "$last/adapter_config.json" ] && ! complete "$last" && echo "$last"
   done
@@ -47,9 +47,9 @@ adapters=$(pending | grep "^outputs/runs/$model/" | tr '\n' ' ')
 echo "evaluating $(wc -w <<< "$adapters") adapters of $model"
 $EVAL --adapters $adapters
 
-# short QOS allows one submitted job per user, so this resubmit is refused while this job still holds the slot
+# normal QOS so the chain is not refused while this job still runs (short allows one submitted job per user)
 left=$(pending | wc -l)
 [ "$left" -eq 0 ] && exit 0
 echo "$left adapters still pending"
-sbatch slurm/eval_sampled_sweep.sh || echo "resubmit refused; run 'sbatch slurm/eval_sampled_sweep.sh' once the short slot frees"
+sbatch -J "$SLURM_JOB_NAME" slurm/eval_sampled_sweep.sh  # MODEL propagates through the exported environment
 exit 0
