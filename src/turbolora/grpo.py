@@ -73,6 +73,8 @@ class SaveOnPreempt(TrainerCallback):
 class Snapshot(TrainerCallback):
     """At steps 1, 2, 4, ... and the last: save the trainable tensors to snapshots/step-N and eval greedily on the full test sets.
 
+    The last snapshot is also evaluated sampled (K=4, T=1, GRPO's rollout setting), written as <task>@4 like eval.py --samples 4.
+
     Only the last snapshot also gets the full PEFT export, which eval.py loads standalone; earlier ones
     are rebuilt by `Adapter.attach(model, rank, seed)` + loading trainable.safetensors (the frozen bases are seeded).
     """
@@ -89,9 +91,9 @@ class Snapshot(TrainerCallback):
         self.model, self.adapter, self.spec, self.root = model, adapter, spec, root
         self.trainable = [n for n, p in model.named_parameters() if p.requires_grad]
         self.datasets = {task: TASKS[task]("test") for task in tasks}
-        self.sampling = SamplingParams(
-            temperature=0.0, max_tokens=max_tokens, stop=list(spec.prompt.stop)
-        )
+        stop = list(spec.prompt.stop)
+        self.greedy = SamplingParams(temperature=0.0, max_tokens=max_tokens, stop=stop)
+        self.sampled = SamplingParams(n=4, temperature=1.0, max_tokens=max_tokens, stop=stop)
 
     def on_step_end(self, args, state, control, **kwargs):
         step = state.global_step
@@ -110,19 +112,24 @@ class Snapshot(TrainerCallback):
             self.adapter.export(self.model, str(out_dir))
         # same call the rollout path uses: a LoRARequest built from the live state_dict
         request = self.model.load_lora(str(self.root / "eval_lora"), load_tensors=True)
-        generate = lambda prompts: [
-            o.outputs[0].text
-            for o in self.model.fast_generate(
-                prompts, self.sampling, use_tqdm=False, lora_request=request
-            )
-        ]
-        for task, dataset in self.datasets.items():
-            records = evaluate(generate, self.spec, dataset)
-            stats = summarize(records)
-            print(
-                f"[step {step} {task}] accuracy: {stats['accuracy']:.4f} ({stats['n_correct']}/{stats['n']})"
-            )
-            write_result(out_dir, task, stats, records, step=step)
+        for sampling in [self.greedy, self.sampled] if last else [self.greedy]:
+            generate = lambda prompts: [
+                [c.text for c in o.outputs]
+                for o in self.model.fast_generate(
+                    prompts, sampling, use_tqdm=False, lora_request=request
+                )
+            ]
+            suffix = f"@{sampling.n}" if sampling.n > 1 else ""
+            for task, dataset in self.datasets.items():
+                records = evaluate(generate, self.spec, dataset)
+                stats = summarize(records)
+                print(
+                    f"[step {step} {task}{suffix}] accuracy: {stats['accuracy']:.4f} "
+                    f"({stats['n_correct']}/{stats['n'] * sampling.n})"
+                )
+                write_result(
+                    out_dir, task, stats, records, suffix, step=step, temperature=sampling.temperature
+                )
         return out_dir
 
 
