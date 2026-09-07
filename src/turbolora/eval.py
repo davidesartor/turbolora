@@ -8,6 +8,7 @@ import resource
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def usage(seconds: float) -> dict:
     }
 
 
-if __name__ == "__main__":
+def main() -> None:
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
 
@@ -243,6 +244,19 @@ if __name__ == "__main__":
             )
             print(f"wrote {out_path}")
 
-    # vLLM's engine teardown can hang the interpreter at exit; skip it
+
+if __name__ == "__main__":
+    # vLLM's engine teardown can hang the interpreter at exit, even after a crash; skip it
+    try:
+        main()
+        code = 0
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1 if exc.code else 0
+        if isinstance(exc.code, str):
+            print(exc.code, file=sys.stderr)
+    except BaseException:
+        traceback.print_exc()
+        code = 1
     sys.stdout.flush()
-    os._exit(0)
+    sys.stderr.flush()
+    os._exit(code)
