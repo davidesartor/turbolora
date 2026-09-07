@@ -15,8 +15,17 @@ cd "${SLURM_SUBMIT_DIR:?}"
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
 
+# eval.py exits via os._exit, so the vLLM engine core can outlive it and keep the GPU; the next engine wants 90% of it
+release_gpu() {
+    for _ in $(seq 12); do
+        [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && return
+        sleep 5
+    done
+    nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9
+    sleep 5
+}
+
 for model in ${MODEL:?}; do
     uv run -m turbolora.eval --model "$model" --tasks ${TASKS:-gsm8k} --samples "${SAMPLES:-1}" --skip-existing ${SHOW:+--show $SHOW} --tp "${TP:-1}"
-    # the engine core releases the GPU a few seconds after the process exits; the next engine wants 90% of it
-    until [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ]; do sleep 5; done
+    release_gpu
 done

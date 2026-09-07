@@ -39,11 +39,20 @@ pending() {
 next=$(pending | head -1)
 [ -z "$next" ] && { echo "nothing pending"; exit 0; }
 
+# eval.py exits via os._exit, so the vLLM engine core can outlive it and keep the GPU; the next engine wants 90% of it
+release_gpu() {
+    for _ in $(seq 12); do
+        [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ] && return
+        sleep 5
+    done
+    nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9
+    sleep 5
+}
+
 # one engine load serves a single base model: its untrained baseline first, then every pending adapter of that model
 model=$(cut -d/ -f4 <<< "$next")
 complete "outputs/runs/$(family "$model")/$model/base" || $EVAL --model "$model"
-# the baseline's vLLM engine core releases the GPU a few seconds after the process exits; the next engine wants 90% of it
-until [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ]; do sleep 5; done
+release_gpu
 adapters=$(pending | grep "^outputs/runs/[^/]*/$model/" | tr '\n' ' ')
 echo "evaluating $(wc -w <<< "$adapters") adapters of $model"
 $EVAL --adapters $adapters
