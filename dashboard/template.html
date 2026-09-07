@@ -597,7 +597,7 @@ function showTip(el) {
 function openDrawer(who, task, stats) {
   closeDrawer();
   const pred = (v) => `<b class="${v == null ? "none" : "pred"} mono">${v == null ? "unparsed" : esc(v)}</b>`;
-  const items = stats.misses.map((r) => `<li><q>${esc(DATA.questions[r.q])}</q><div class="pair"><span>predicted ${(Array.isArray(r.predicted) ? r.predicted : [r.predicted]).map(pred).join(" ")}</span><span>answer <b class="gold mono">${esc(r.answer)}</b></span></div></li>`);
+  const items = stats.misses.map(([q, predicted]) => `<li><q>${esc(DATA.questions[q][0])}</q><div class="pair"><span>predicted ${(Array.isArray(predicted) ? predicted : [predicted]).map(pred).join(" ")}</span><span>answer <b class="gold mono">${esc(DATA.questions[q][1])}</b></span></div></li>`);
   const drawer = document.createElement("aside");
   drawer.className = "drawer";
   drawer.innerHTML = `<header><div><div class="eyebrow">${esc(who)} · ${label(task)}</div><h2>${stats.wrong} wrong of ${stats.n * (stats.samples ?? 1)}${stats.samples ? ` completions (${stats.misses.length} questions not fully solved)` : ""} <span style="color:var(--muted);font-weight:500">(${stats.unparsed} unparsed)</span></h2></div><button type="button" id="close">Close</button></header>${items.length ? `<ol>${items.join("")}</ol>` : `<div class="empty">Every answer was correct.</div>`}`;

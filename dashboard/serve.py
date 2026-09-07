@@ -36,8 +36,8 @@ def load_task(path: Path) -> dict:
     key = (path, path.stat().st_mtime_ns)
     if key not in TASK_CACHE:
         TASK_CACHE[key] = read_task(path)
-    # collect() rewrites each miss in place when pooling questions: hand out copies
-    return TASK_CACHE[key] | dict(misses=[dict(m) for m in TASK_CACHE[key]["misses"]])
+    # collect() replaces the misses when pooling questions: hand out a shallow copy
+    return dict(TASK_CACHE[key])
 
 
 def read_task(path: Path) -> dict:
@@ -274,13 +274,12 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: 
     # keep MODELS' declaration order so families stay grouped
     ordered = {name: models[name] for name in MODELS if name in models}
 
-    # the same benchmark question is missed by hundreds of runs: store each once and index into the pool
-    questions: dict[str, int] = {}
+    # the same benchmark question is missed by hundreds of runs: pool (question, answer) once, a miss is [pool index, predicted]
+    questions: dict[tuple[str, str], int] = {}
     for stats in [t for r in [*runs.values(), *ordered.values()] for e in r["evals"].values() for t in e.values()]:
-        for miss in stats["misses"]:
-            miss["q"] = questions.setdefault(miss.pop("question"), len(questions))
+        stats["misses"] = [[questions.setdefault((m["question"], m["answer"]), len(questions)), m["predicted"]] for m in stats["misses"]]
 
-    return dict(models=ordered, runs=runs, questions=list(questions), tasks=EVAL_TASKS, objectives=OBJECTIVES)
+    return dict(models=ordered, runs=runs, questions=[list(qa) for qa in questions], tasks=EVAL_TASKS, objectives=OBJECTIVES)
 
 
 class Dashboard(http.server.BaseHTTPRequestHandler):
