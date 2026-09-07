@@ -11,7 +11,7 @@ from pathlib import Path
 from unsloth import FastLanguageModel  # must import before trl/transformers
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer
@@ -70,13 +70,32 @@ class SaveOnPreempt(TrainerCallback):
             self.requested = False
 
 
+class CheckResume(TrainerCallback):
+    """Once the checkpoint is restored, assert the rebuilt adapter reproduces its materialized lora_B (same SVD signs and P)."""
+
+    def __init__(self, model, checkpoint: str):
+        self.model, self.checkpoint = model, checkpoint
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        saved = load_file(f"{self.checkpoint}/adapter_model.safetensors")
+        live = self.model.state_dict()
+        for key, expected in saved.items():
+            if not key.endswith(".lora_B.weight"):
+                continue
+            actual = live[key].detach().float().cpu()
+            error = (actual - expected.float()).norm() / max(expected.float().norm(), 1e-12)
+            if error > 1e-2:
+                raise RuntimeError(f"resumed adapter differs from {self.checkpoint} at {key} (rel err {error:.3f}): SVD bases or P mismatch")
+        print(f"resumed adapter matches {self.checkpoint}")
+
+
 class Snapshot(TrainerCallback):
     """At steps 1, 2, 4, ... and the last: save the trainable tensors to snapshots/step-N and eval greedily on the full test sets.
 
-    The last snapshot is also evaluated sampled (K=4, T=1, GRPO's rollout setting), written as <task>@4 like eval.py --samples 4.
+    The last snapshot is also evaluated sampled (K=4, T=1, GRPO's rollout setting), written under eval@4 like eval.py --samples 4.
 
-    Only the last snapshot also gets the full PEFT export, which eval.py loads standalone; earlier ones
-    are rebuilt by `Adapter.attach(model, rank, seed)` + loading trainable.safetensors (the frozen bases are seeded).
+    Each snapshot also refreshes the run's final_adapter PEFT export, which eval.py loads standalone; an earlier snapshot is that
+    export with its trainable tensors swapped in (SVD adapters: `attach(..., bases=<its lora_A>)` + trainable.safetensors).
     """
 
     def __init__(
@@ -87,8 +106,9 @@ class Snapshot(TrainerCallback):
         tasks: list[str],
         max_tokens: int,
         root: Path,
+        export_dir: Path,
     ):
-        self.model, self.adapter, self.spec, self.root = model, adapter, spec, root
+        self.model, self.adapter, self.spec, self.root, self.export_dir = model, adapter, spec, root, export_dir
         self.trainable = [n for n, p in model.named_parameters() if p.requires_grad]
         self.datasets = {task: TASKS[task]("test") for task in tasks}
         stop = list(spec.prompt.stop)
@@ -102,16 +122,17 @@ class Snapshot(TrainerCallback):
         self.save_and_eval(step, last=step == state.max_steps)
 
     def save_and_eval(self, step: int, last: bool) -> Path:
-        """Write snapshots/step-N (trainable tensors, PEFT export if `last`) and eval it on every task."""
+        """Write snapshots/step-N (trainable tensors), refresh the final_adapter export, and eval on every task."""
         out_dir = self.root / f"step-{step:06d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         params = dict(self.model.named_parameters())
         trainable = {n: params[n].detach().cpu().contiguous() for n in self.trainable}
         save_file(trainable, out_dir / "trainable.safetensors")
-        if last:
-            self.adapter.export(self.model, str(out_dir))
-        # same call the rollout path uses: a LoRARequest built from the live state_dict
-        request = self.model.load_lora(str(self.root / "eval_lora"), load_tensors=True)
+        self.adapter.export(self.model, str(self.export_dir))
+        # same call the rollout path uses: a LoRARequest built from the live state_dict, sharing Unsloth's config-only
+        # placeholder dir (relative to the run dir, its name is <trainer file>_lora_model_<CUDA_VISIBLE_DEVICES>)
+        placeholder = "grpo_trainer_lora_model_" + os.environ.get("CUDA_VISIBLE_DEVICES", "0").replace(",", "")
+        request = self.model.load_lora(placeholder, load_tensors=True)
         for sampling in [self.greedy, self.sampled] if last else [self.greedy]:
             generate = lambda prompts: [
                 [c.text for c in o.outputs]
@@ -119,16 +140,15 @@ class Snapshot(TrainerCallback):
                     prompts, sampling, use_tqdm=False, lora_request=request
                 )
             ]
-            suffix = f"@{sampling.n}" if sampling.n > 1 else ""
             for task, dataset in self.datasets.items():
                 records = evaluate(generate, self.spec, dataset)
                 stats = summarize(records)
                 print(
-                    f"[step {step} {task}{suffix}] accuracy: {stats['accuracy']:.4f} "
+                    f"[step {step} {task}@{sampling.n}] accuracy: {stats['accuracy']:.4f} "
                     f"({stats['n_correct']}/{stats['n'] * sampling.n})"
                 )
                 write_result(
-                    out_dir, task, stats, records, suffix, step=step, temperature=sampling.temperature
+                    out_dir, task, stats, records, sampling.n, step=step, temperature=sampling.temperature
                 )
         return out_dir
 
@@ -196,7 +216,19 @@ def run(
     )
     spec = MODELS[args.model]
 
-    model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, **adapter_kwargs)
+    # final_adapter is the PEFT export of the current state, written at first start and refreshed at every snapshot; every
+    # restart (and BO) reuses its lora_A as the SVD bases, since solvers on different cards can flip singular-pair signs
+    final_adapter = Path(args.out) / "final_adapter"
+    last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
+    bases_export = final_adapter / "adapter_model.safetensors"
+    bases = None
+    if bases_export.is_file():
+        bases = {k: v for k, v in load_file(bases_export).items() if k.endswith(".lora_A.weight")}
+    elif last_checkpoint:
+        raise SystemExit(f"{args.out} has a checkpoint but no final_adapter to take the SVD bases from")
+    model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, bases=bases, **adapter_kwargs)
+    if not (final_adapter / "adapter_model.safetensors").is_file():
+        adapter.export(model, str(final_adapter))
 
     # raw-text prompts as in SimpleRL-Zoo: TRL then skips the tokenizer's chat template
     dataset = TASKS[args.task]("train").map(
@@ -240,6 +272,7 @@ def run(
     )
     callbacks: list[TrainerCallback] = [
         SaveOnPreempt(),
+        *([CheckResume(model, last_checkpoint)] if last_checkpoint else []),
         Snapshot(
             model,
             adapter,
@@ -247,6 +280,7 @@ def run(
             [] if args.no_eval else args.eval_tasks,
             args.max_completion,
             Path(args.out) / "snapshots",
+            final_adapter,
         ),
     ]
     trainer = GRPOTrainer(
@@ -275,7 +309,6 @@ def run(
     )
     (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
 
-    last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     start = time.time()
     os.chdir(args.out)
     trainer.train(resume_from_checkpoint=last_checkpoint)

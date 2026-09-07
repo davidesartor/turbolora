@@ -22,11 +22,11 @@ export VLLM_CACHE_ROOT=/tmp/vllm
 
 TASKS="gsm8k math500 aime24 amc23 minerva olympiad"
 
-# snapshots missing any task's results, oldest run first
+# last snapshot of every finished run (run.json carries train_hours) missing any task's greedy results
 pending() {
-  find outputs/runs -path "*/snapshots/step-*" -name adapter_config.json | sort | while read -r c; do
-    a=$(dirname "$c")
-    [ "$(ls "$a"/*.json.gz 2>/dev/null | wc -l)" -lt 6 ] && echo "$a"
+  grep -l train_hours outputs/runs/*/*/*/*/seed*/run.json | sort | while read -r r; do
+    a=$(ls -d "$(dirname "$r")"/snapshots/step-* 2>/dev/null | sort | tail -1)
+    [ -n "$a" ] && [ "$(ls "$a"/eval@1/*.json.gz 2>/dev/null | wc -l)" -lt 6 ] && echo "$a"
   done
 }
 

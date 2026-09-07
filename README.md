@@ -83,7 +83,7 @@ tests/
 collaborators-poc/   original proof-of-concept BO pipeline (kept for reference)
 ```
 
-Outputs are gitignored: `outputs/baselines/<model>/<task>.json.gz` (+ `eval.json` summary) and `outputs/runs/<model>/<task>/<cfg>/seed<N>/` with `run.json`, `curves.jsonl` (per-step training metrics, rewritten every step) and `snapshots/step-N/` at steps 1, 2, 4, … and the last: `trainable.safetensors`, the 6 `<task>.json.gz` completion sets and `eval.json`; the last snapshot also holds the PEFT export (`adapter_config.json`, `adapter_model.safetensors`) that `eval.py` loads standalone.
+Outputs are gitignored. Evals always land in an `eval@K/` dir (K=1 greedy, K=4 sampled) holding the 6 `<task>.json.gz` completion sets and a `summary.json`. The untrained model is the `base` adapter: `outputs/runs/<family>/<model>/base/eval@K/`. Training runs are `outputs/runs/<family>/<model>/<adapter>-<loss>/<cfg>/seed<N>/` with `run.json`, `curves.jsonl` (per-step training metrics, rewritten every step), `final_adapter/` (PEFT export written at startup and refreshed at every snapshot, so a resumed run rebuilds the same SVD bases) and `snapshots/step-N/` at steps 1, 2, 4, … and the last: `trainable.safetensors` plus `eval@1/`; the last snapshot also gets `eval@4/`.
 
 ## Usage
 
@@ -103,7 +103,7 @@ MODEL=qwen2.5-7b TASK=easy CFG=u1 sbatch slurm/bo.sh --proj-dim 1
 MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --untie
 
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
-ADAPTERS=outputs/runs/qwen2.5-7b/hard/tinylora-grpo-r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
+ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
 sbatch slurm/eval_sweep.sh   # every snapshot with a PEFT export that lacks any of the 6 tasks
 
 # locally / interactively

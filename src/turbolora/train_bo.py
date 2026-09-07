@@ -41,7 +41,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=True, help="greedy completions (the eval sampler); --no-greedy samples at GRPO's T=1")
     parser.add_argument("--k-rollouts", type=int, default=1, help="completions per prompt (needs --no-greedy if >1)")
     parser.add_argument("--no-eval", action="store_true", help="snapshot the pick only, skip its evals")
-    parser.add_argument("--bases", type=Path, default=None, help="LoRA export whose lora_A fixes the SVD signs; default: the tinylora-grpo run with the same model/task/rank/u/seed")
+    parser.add_argument("--bases", type=Path, default=None, help="PEFT export whose lora_A fixes the SVD signs; default: the tinylora-grpo run with the same model/task/rank/u/seed")
     parser.add_argument(
         "--eval-tasks",
         nargs="+",
@@ -66,16 +66,15 @@ def questions_per_theta(batch: int, k_rollouts: int) -> int:
 
 
 def grpo_bases(args: argparse.Namespace) -> tuple[Path, dict[str, Tensor]]:
-    """lora_A of the matching tinylora-grpo export (`--bases` or the same model/task/rank/u/seed under outputs/runs), so BO searches in that run's SVD signs."""
+    """lora_A of the matching tinylora-grpo run (`--bases`, or its final_adapter under outputs/runs), so BO searches in that run's SVD signs."""
     path = args.bases
     if path is None:
-        run = Path("outputs/runs") / args.model / args.task / f"tinylora-grpo-r{args.rank}-u{args.proj_dim}" / f"seed{args.seed}"
-        exports = sorted(run.glob("snapshots/step-*/adapter_model.safetensors"))
-        if not exports:
-            raise FileNotFoundError(f"BO needs a reference export to fix the SVD signs: none under {run}; pass --bases")
-        path = exports[-1]
+        run = Path("outputs/runs") / MODELS[args.model].family / args.model / "tinylora-grpo" / f"r{args.rank}-u{args.proj_dim}" / f"seed{args.seed}"
+        path = run / "final_adapter" / "adapter_model.safetensors"
+        if not path.is_file():
+            raise FileNotFoundError(f"BO needs a reference run to fix the SVD signs: no {path}; pass --bases")
     if not path.is_file():
-        raise FileNotFoundError(f"reference export {path} not found")
+        raise FileNotFoundError(f"reference {path} not found")
     with safe_open(str(path), "pt") as f:
         return path, {k: f.get_tensor(k) for k in f.keys() if k.endswith(".lora_A.weight")}
 

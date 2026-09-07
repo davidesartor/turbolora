@@ -88,13 +88,22 @@ def resolve_run(
         return model, Path(out_dir) if out_dir else Path(adapter)
     if not model:
         raise SystemExit("--model is required without --adapter")
-    return model, Path(out_dir or "outputs/baselines") / model
+    return model, Path(out_dir or "outputs/runs") / MODELS[model].family / model / "base"
+
+
+def lora_weights(snapshot: str) -> Path:
+    """The run's final_adapter PEFT export, which matches the last snapshot only."""
+    snapshot_dir = Path(snapshot)
+    run_dir = snapshot_dir.parent.parent
+    if snapshot_dir != sorted(run_dir.glob("snapshots/step-*"))[-1]:
+        raise SystemExit(f"{snapshot} is not the run's last snapshot, so final_adapter does not match it")
+    return run_dir / "final_adapter"
 
 
 def lora_engine_args(adapters: list[str]) -> dict:
     """vLLM's LoRA kernels need max_lora_rank >= 8 even for a rank-2 adapter."""
     ranks = [
-        json.loads((Path(a) / "adapter_config.json").read_text())["r"] for a in adapters
+        json.loads((lora_weights(a) / "adapter_config.json").read_text())["r"] for a in adapters
     ]
     return dict(enable_lora=True, max_lora_rank=max(8, *ranks))
 
@@ -199,7 +208,7 @@ if __name__ == "__main__":
 
     for index, (adapter, (_, out_dir)) in enumerate(zip(adapters, runs)):
         lora_request = (
-            LoRARequest(f"adapter{index}", index + 1, str(Path(adapter).resolve()))
+            LoRARequest(f"adapter{index}", index + 1, str(lora_weights(adapter).resolve()))
             if adapter
             else None
         )

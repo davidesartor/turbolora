@@ -30,9 +30,9 @@ complete() { [ "$(ls "$1"/eval@$SAMPLES/*.json.gz 2>/dev/null | wc -l)" -ge 6 ];
 
 # last snapshot of every finished run (run.json carries train_hours) that still lacks any sampled task
 pending() {
-  grep -l train_hours outputs/runs/${MODEL:-*}/*/*/seed*/run.json | sort | while read -r r; do
+  grep -l train_hours outputs/runs/*/${MODEL:-*}/*/*/seed*/run.json | sort | while read -r r; do
     last=$(ls -d "$(dirname "$r")"/snapshots/step-* 2>/dev/null | sort | tail -1)
-    [ -n "$last" ] && [ -f "$last/adapter_config.json" ] && ! complete "$last" && echo "$last"
+    [ -n "$last" ] && ! complete "$last" && echo "$last"
   done
 }
 
