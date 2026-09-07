@@ -122,3 +122,11 @@ Jobs run on `gpu-preempt` with requeue; training checkpoints on SIGTERM/SIGUSR1 
 - LoRA-XS: arXiv 2405.17604
 - SimpleRL-Zoo data tiers and prompts: arXiv 2503.18892
 - LoRA Without Regret (LoRA LR = 10x full-FT): https://thinkingmachines.ai/blog/lora/
+
+## Pending: SVD sign consistency of pre-fix requeued runs
+
+The frozen SVD bases (`loraxs`, `tinylora`) are recomputed at every (re)start, and `torch.linalg.svd` picks singular-vector signs per GPU type (A100-80G/A16/L4 agree, L40S differs). Before the sign pin in `adapters.py` (2026-09-07), a run requeued onto a different family kept training `R`/`v` against flipped `U`, so its export and its snapshots are in inconsistent spaces. Runs are classified in `tmp/run-audit-2026-09-07-final.csv` (109 clean, 49 unclean, 22 `loraxs` undecidable). Unclean `tinylora` runs are kept: the turbo twin, the export and the eval all pin to the same `lora_B`, so they stay consistent. The `loraxs` verdicts are still open because the H100, A40 and A100-40G sign families are not measured yet. To finish:
+
+1. Run `sbatch --constraint=<card> tmp/svd-signs/job.sh` for `h100`, `a40`, `a100-40g` (queued as jobs 64045795/97/99 and 64045870/71/72, 64047600 on 2026-09-07). Each SVDs layer-0 weights of the 6 models on that card and saves `tmp/svd-signs/<gpu>.pt`.
+2. `uv run tmp/svd-signs/compare.py` prints pairwise sign flips between cards; cards with zero flips are one family.
+3. For each undecidable run, map its requeue history (node → card → family, from `sacct -j <id> -o JobID,NodeList,Start`) and mark it clean if every instance ran in one family, otherwise unclean. Update the csv and the memory note.
