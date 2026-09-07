@@ -230,7 +230,8 @@ def run(
     if last_checkpoint:
         bases = {k: v for k, v in load_file(f"{last_checkpoint}/adapter_model.safetensors").items() if ".lora_" in k}
     elif bases_export.is_file():
-        bases = {k: v for k, v in load_file(bases_export).items() if k.endswith(".lora_A.weight")}
+        # a fresh start over an export (e.g. a twin's copied final_adapter) pins U to that export's lora_B too
+        bases = {k: v for k, v in load_file(bases_export).items() if ".lora_" in k}
     model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, bases=bases, **adapter_kwargs)
     if not (final_adapter / "adapter_model.safetensors").is_file():
         adapter.export(model, str(final_adapter))
@@ -257,6 +258,8 @@ def run(
         per_device_train_batch_size=ROLLOUTS_PER_PROMPT,
         gradient_accumulation_steps=PROMPTS_PER_STEP,
         beta=0.0,
+        # dual-clip PPO: caps ratio·|A| for A<0 tokens, whose bf16 old-logp noise otherwise gives unbounded grad spikes
+        delta=2.0,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,
         max_prompt_length=MAX_PROMPT_LENGTH,

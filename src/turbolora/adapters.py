@@ -95,7 +95,7 @@ def pin_signs(U: Tensor, lora_B: Tensor, R: Tensor) -> Tensor:
     """
     # Uᵀ·B·Rᵀ = D·Σ·(R·Rᵀ) has diagonal D·Σ·‖Rᵢ‖²: reads D without inverting an ill-conditioned R
     signs = torch.sign(torch.diagonal(U.T @ lora_B.to(U) @ R.to(U).T))
-    return U * signs
+    return U * torch.where(signs == 0, 1.0, signs)
 
 
 def fit_tied_v(Ms: list[Tensor], Ps: list[Tensor]) -> Tensor:
@@ -163,7 +163,7 @@ class LoRAXS(Adapter):
             lora_a = cast(nn.Linear, layer.lora_A["default"])
             lora_a.weight.data.copy_(Vh)
             lora_a.weight.requires_grad_(False)
-            if bases is not None and f"{name}.lora_B.weight" in bases:
+            if bases is not None and f"{name}.lora_v" in bases:
                 U = pin_signs(U, bases[f"{name}.lora_B.weight"], bases[f"{name}.lora_v"])
             # trainable tensor goes under `lora_v` so PEFT checkpoints it for resume
             R = nn.Parameter(torch.zeros(rank, rank, device=U.device))
