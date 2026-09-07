@@ -2,16 +2,39 @@
 
 import ast
 import re
-from typing import Protocol
+import signal
+from contextlib import contextmanager
+from typing import Iterator, Protocol
 
 from datasets import Dataset, load_dataset
 from math_verify import parse, verify
+from math_verify.errors import TimeoutException
+
+
+@contextmanager
+def grading_deadline(seconds: float = 5) -> Iterator[None]:
+    """Re-firing SIGALRM around math-verify: its own one-shot alarm is lost when it lands inside a __del__ (exception ignored), leaving sympy unbounded."""
+
+    def raise_timeout(*_: object) -> None:
+        raise TimeoutException("grading timed out")
+
+    previous = signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds, 1)
+    try:
+        yield
+    except TimeoutException:
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def extract(completion: str) -> str | None:
     """Final answer as math-verify extracts it: last \\boxed{}, else last math expression."""
-    parsed = parse(completion.replace("\\boxed{}", ""))
-    return parsed[-1] if parsed else None
+    with grading_deadline():
+        parsed = parse(completion.replace("\\boxed{}", ""), parsing_timeout=None)
+        return parsed[-1] if parsed else None
+    return None
 
 
 def grade(prediction: str | None, reference: str) -> bool:
@@ -20,10 +43,13 @@ def grade(prediction: str | None, reference: str) -> bool:
         return False
     # spell out `4.5e33` as `4.5\times10^{33}`; math-verify would otherwise read it as 4.5*e*33
     sci = re.compile(r"(\d)[eE]([-+]?\d+)\b")
-    return verify(
-        parse(f"${sci.sub(r'\1\\times10^{\2}', reference)}$"),
-        parse(f"${sci.sub(r'\1\\times10^{\2}', prediction)}$"),
-    )
+    with grading_deadline():
+        return verify(
+            parse(f"${sci.sub(r'\1\\times10^{\2}', reference)}$", parsing_timeout=None),
+            parse(f"${sci.sub(r'\1\\times10^{\2}', prediction)}$", parsing_timeout=None),
+            timeout_seconds=None,
+        )
+    return False
 
 
 def reward(completions: list[str], answer: list[str], **kwargs) -> list[float]:
