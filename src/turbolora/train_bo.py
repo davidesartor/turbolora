@@ -66,7 +66,11 @@ def questions_per_theta(batch: int, k_rollouts: int) -> int:
 
 
 def grpo_bases(args: argparse.Namespace) -> tuple[Path, dict[str, Tensor]]:
-    """lora_A of the matching tinylora-grpo run (`--bases`, or its final_adapter under outputs/runs), so BO searches in that run's SVD signs."""
+    """SVD bases of the matching tinylora-grpo run (`--bases`, or its final_adapter under outputs/runs).
+
+    Its lora_A fixes Vᵀ; its lora_B plus the last snapshot's v pin U's signs to the ones its final eval used
+    (a pre-2026-09-07 requeue could flip some), so BO searches exactly that run's space.
+    """
     path = args.bases
     if path is None:
         run = Path("outputs/runs") / MODELS[args.model].family / args.model / "tinylora-grpo" / f"r{args.rank}-u{args.proj_dim}" / f"seed{args.seed}"
@@ -75,8 +79,26 @@ def grpo_bases(args: argparse.Namespace) -> tuple[Path, dict[str, Tensor]]:
             raise FileNotFoundError(f"BO needs a reference run to fix the SVD signs: no {path}; pass --bases")
     if not path.is_file():
         raise FileNotFoundError(f"reference {path} not found")
+    run = path.parents[1]
     with safe_open(str(path), "pt") as f:
-        return path, {k: f.get_tensor(k) for k in f.keys() if k.endswith(".lora_A.weight")}
+        bases = {k: f.get_tensor(k) for k in f.keys() if ".lora_" in k}
+    modules = [k.removesuffix(".lora_B.weight") for k in bases if k.endswith(".lora_B.weight")]
+
+    # the export strips lora_v: take it from the snapshot the export was made at (tied v is stored once),
+    # or, while the run is still training, use its last checkpoint outright (lora_A/B/v at one step)
+    snapshots = sorted(run.glob("snapshots/step-*/trainable.safetensors"))
+    checkpoints = sorted(run.glob("checkpoint-*/adapter_model.safetensors"), key=lambda p: int(p.parent.name.split("-")[1]))
+    if snapshots:
+        with safe_open(str(snapshots[-1]), "pt") as f:
+            vs = {k.removesuffix(".default"): f.get_tensor(k) for k in f.keys()}
+        for name in modules:
+            bases[f"{name}.lora_v"] = vs[f"{name}.lora_v"] if len(vs) > 1 else next(iter(vs.values()))
+    elif checkpoints:
+        with safe_open(str(checkpoints[-1]), "pt") as f:
+            bases = {k: f.get_tensor(k) for k in f.keys() if ".lora_" in k}
+    else:  # old snapshot layout kept no v: TinyLoRA.attach fits the tied v from lora_B before pinning
+        print(f"{run} has no trainable.safetensors or checkpoint; fitting v from its lora_B to pin the SVD signs")
+    return path, bases
 
 
 def max_grpo_displacement(n_prompts: int, rank: int, proj_dim: int) -> float:
@@ -85,7 +107,7 @@ def max_grpo_displacement(n_prompts: int, rank: int, proj_dim: int) -> float:
     return lr * grpo_steps(n_prompts)
 
 
-def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA, search: bo.Search = bo.search, loss: str = "bo") -> None:
+def run(args: argparse.Namespace, adapter: type[Adapter], search: bo.Search, loss: str) -> None:
     """Load the base, attach `adapter`, `search` its v's, export the pick to `<out>/final_adapter`, write run.json."""
     from vllm import SamplingParams
 
@@ -119,6 +141,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA, search: bo.
         [] if args.no_eval else args.eval_tasks,
         args.max_completion,
         out / "snapshots",
+        out / "final_adapter",
     )
     model.requires_grad_(False)  # search only: no autograd graph anywhere
     print(f"{adapter.__name__}: {len(vs)} v's, θ ∈ ℝ^{dim}")
@@ -225,11 +248,3 @@ def run(args: argparse.Namespace, adapter: type[Adapter] = TinyLoRA, search: bo.
         peak_vram_gb=round(torch.cuda.max_memory_allocated() / 2**30, 2),
     )
     (out / "run.json").write_text(json.dumps(summary, indent=1))
-
-
-def main() -> None:
-    run(argument_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()

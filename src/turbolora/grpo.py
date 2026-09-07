@@ -71,7 +71,11 @@ class SaveOnPreempt(TrainerCallback):
 
 
 class CheckResume(TrainerCallback):
-    """Once the checkpoint is restored, assert the rebuilt adapter reproduces its materialized lora_B (same SVD signs and P)."""
+    """Once the checkpoint is restored, assert the rebuilt adapter reproduces its materialized lora_B (same SVD signs and P).
+
+    Tolerance: bf16 storage costs ~0.3%; near-degenerate singular pairs (e.g. Qwen2.5-7B layer-0 up_proj, σ₂/σ₃ = 4.711/4.705)
+    give solver-dependent directions worth up to ~2%; a flipped sign is ≥13%.
+    """
 
     def __init__(self, model, checkpoint: str):
         self.model, self.checkpoint = model, checkpoint
@@ -82,9 +86,9 @@ class CheckResume(TrainerCallback):
         for key, expected in saved.items():
             if not key.endswith(".lora_B.weight"):
                 continue
-            actual = live[key].detach().float().cpu()
+            actual = live[key.replace(".lora_B.weight", ".lora_B.default.weight")].detach().float().cpu()
             error = (actual - expected.float()).norm() / max(expected.float().norm(), 1e-12)
-            if error > 1e-2:
+            if error > 5e-2:
                 raise RuntimeError(f"resumed adapter differs from {self.checkpoint} at {key} (rel err {error:.3f}): SVD bases or P mismatch")
         print(f"resumed adapter matches {self.checkpoint}")
 
@@ -217,15 +221,16 @@ def run(
     spec = MODELS[args.model]
 
     # final_adapter is the PEFT export of the current state, written at first start and refreshed at every snapshot; every
-    # restart (and BO) reuses its lora_A as the SVD bases, since solvers on different cards can flip singular-pair signs
+    # restart (and BO) reuses its lora_A as the SVD bases, since solvers on different cards can flip singular-pair signs.
+    # A resume also passes the checkpoint's lora_B and lora_v, which pin U's signs to the ones the run actually trained with.
     final_adapter = Path(args.out) / "final_adapter"
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     bases_export = final_adapter / "adapter_model.safetensors"
     bases = None
-    if bases_export.is_file():
+    if last_checkpoint:
+        bases = {k: v for k, v in load_file(f"{last_checkpoint}/adapter_model.safetensors").items() if ".lora_" in k}
+    elif bases_export.is_file():
         bases = {k: v for k, v in load_file(bases_export).items() if k.endswith(".lora_A.weight")}
-    elif last_checkpoint:
-        raise SystemExit(f"{args.out} has a checkpoint but no final_adapter to take the SVD bases from")
     model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, bases=bases, **adapter_kwargs)
     if not (final_adapter / "adapter_model.safetensors").is_file():
         adapter.export(model, str(final_adapter))

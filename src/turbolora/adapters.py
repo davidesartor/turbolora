@@ -5,7 +5,7 @@ from jaxtyping import Float
 from unsloth import FastLanguageModel  # must import before peft/transformers
 
 import torch
-from einops import einsum
+from einops import einsum, rearrange
 from peft.tuners.lora import LoraLayer
 from torch import Tensor, nn
 
@@ -53,11 +53,12 @@ class LoRA(Adapter):
 
 def svd_lora_layers(
     model, rank: int, seed: int, bases: dict[str, Tensor] | None = None
-) -> tuple[nn.Module, list[tuple[LoraLayer, Tensor, Tensor, Tensor]]]:
-    """PEFT-wrap `model` and return each adapted module with the top-`rank` SVD (U, S, Vᵀ) of its frozen weight.
+) -> tuple[nn.Module, list[tuple[str, LoraLayer, Tensor, Tensor, Tensor]]]:
+    """PEFT-wrap `model` and return each adapted module (name, layer) with the top-`rank` SVD (U, S, Vᵀ) of its frozen weight.
 
     `bases` (lora_A tensors of an exported run, by state_dict key) fixes Vᵀ to that run's, so the search space is
-    the same one it trained in: SVD signs differ between the cluster's solvers, and UΣ = W·V follows from Vᵀ alone.
+    the same one it trained in: SVD signs differ between the cluster's solvers, and UΣ = W·V follows from Vᵀ alone
+    (up to signs; see `pin_signs` for runs whose U came from another solver than their Vᵀ).
     """
     model = FastLanguageModel.get_peft_model(
         model,
@@ -78,12 +79,43 @@ def svd_lora_layers(
             Vh = bases[f"{name}.lora_A.weight"].to(W).float()
             US = W @ Vh.T
             S = US.norm(dim=0)
-            svds.append((layer, US / S, S, Vh))
+            svds.append((name, layer, US / S, S, Vh))
             continue
         U, S, Vh = torch.linalg.svd(W, full_matrices=False)
         # clone: slices are views that would pin every module's full fp32 factors (~35 GB on a 7B)
-        svds.append((layer, U[:, :rank].clone(), S[:rank].clone(), Vh[:rank].clone()))
+        svds.append((name, layer, U[:, :rank].clone(), S[:rank].clone(), Vh[:rank].clone()))
     return model, svds
+
+
+def pin_signs(U: Tensor, lora_B: Tensor, R: Tensor) -> Tensor:
+    """Flip U's columns to the signs of a checkpoint's materialized lora_B = U'·Σ·R.
+
+    Requeues before 2026-09-07 took U from a fresh SVD but Vᵀ from the checkpoint, so such a run trained with
+    U' = U·D for a sign matrix D; resuming with W·V alone would flip those components back.
+    """
+    # Uᵀ·B·Rᵀ = D·Σ·(R·Rᵀ) has diagonal D·Σ·‖Rᵢ‖²: reads D without inverting an ill-conditioned R
+    signs = torch.sign(torch.diagonal(U.T @ lora_B.to(U) @ R.to(U).T))
+    return U * signs
+
+
+def fit_tied_v(Ms: list[Tensor], Ps: list[Tensor]) -> Tensor:
+    """Tied v of a TinyLoRA export that kept no lora_v: Σ⁻¹UᵀB_m = D_m·Σᵢ vᵢP_mᵢ for sign matrices D_m.
+
+    Alternates least squares for v with the row signs D_m (the pre-2026-09-07 flips); v's global sign is unidentifiable
+    and harmless, `pin_signs` only reads D.
+    """
+    M = torch.stack([m.float().cpu() for m in Ms])
+    P = torch.stack([p.float().cpu() for p in Ps])
+    X = rearrange(P, "m u r s -> (m r s) u")
+    D = torch.ones_like(M[:, :, 0])
+    for _ in range(20):
+        y = rearrange(D[:, :, None] * M, "m r s -> (m r s)")
+        v = torch.linalg.lstsq(X, y[:, None]).solution[:, 0]
+        new = torch.sign(torch.einsum("mrs,mrs->mr", M, torch.einsum("u,murs->mrs", v, P)))
+        if torch.equal(new, D):
+            break
+        D = new
+    return v
 
 
 class LoRAXS_B(nn.Module):
@@ -127,10 +159,12 @@ class LoRAXS(Adapter):
     @staticmethod
     def attach(model, rank: int, seed: int, bases: dict[str, Tensor] | None = None, **kwargs) -> nn.Module:
         model, svds = svd_lora_layers(model, rank, seed, bases)
-        for layer, U, S, Vh in svds:
+        for name, layer, U, S, Vh in svds:
             lora_a = cast(nn.Linear, layer.lora_A["default"])
             lora_a.weight.data.copy_(Vh)
             lora_a.weight.requires_grad_(False)
+            if bases is not None and f"{name}.lora_B.weight" in bases:
+                U = pin_signs(U, bases[f"{name}.lora_B.weight"], bases[f"{name}.lora_v"])
             # trainable tensor goes under `lora_v` so PEFT checkpoints it for resume
             R = nn.Parameter(torch.zeros(rank, rank, device=U.device))
             layer.lora_B["default"] = LoRAXS_B(U * S, R, layer.weight.dtype)
@@ -196,18 +230,30 @@ class TinyLoRA(Adapter):
     ) -> nn.Module:
         model, svds = svd_lora_layers(model, rank, seed, bases)
         generator = torch.Generator().manual_seed(seed)
-        device = svds[0][0].weight.device
+        device = svds[0][1].weight.device
         tie = tie or len(svds)  # 0 = one global v
         # one trainable v per `tie` consecutive modules
         vs = [
             nn.Parameter(torch.zeros(proj_dim, device=device))
             for _ in range(-(-len(svds) // tie))
         ]
-        for i, (layer, U, S, Vh) in enumerate(svds):
+        Ps = [torch.randn(proj_dim, rank, rank, generator=generator) for _ in svds]
+        # an export with lora_B but no lora_v (old snapshot layout): recover each group's v from the materialized lora_B
+        if bases is not None and any(f"{name}.lora_B.weight" in bases and f"{name}.lora_v" not in bases for name, *_ in svds):
+            for g in range(len(vs)):
+                group = list(range(g * tie, min((g + 1) * tie, len(svds))))
+                Ms = [(svds[i][2].T @ bases[f"{svds[i][0]}.lora_B.weight"].to(svds[i][2])) / svds[i][3][:, None] for i in group]
+                v = fit_tied_v(Ms, [Ps[i] for i in group])
+                for i in group:
+                    bases[f"{svds[i][0]}.lora_v"] = v
+        for i, (name, layer, U, S, Vh) in enumerate(svds):
             lora_a = cast(nn.Linear, layer.lora_A["default"])
             lora_a.weight.data.copy_(Vh)
             lora_a.weight.requires_grad_(False)
-            P = torch.randn(proj_dim, rank, rank, generator=generator).to(device)
+            P = Ps[i].to(device)
+            if bases is not None and f"{name}.lora_B.weight" in bases:
+                R = torch.einsum("u,urs->rs", bases[f"{name}.lora_v"].to(P), P)
+                U = pin_signs(U, bases[f"{name}.lora_B.weight"], R)
             layer.lora_B["default"] = TinyLoRA_B(
                 U * S, P, vs[i // tie], layer.weight.dtype
             )

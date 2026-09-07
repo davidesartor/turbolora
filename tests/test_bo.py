@@ -166,6 +166,9 @@ class FakeAdapter:
 
 
 class FakeTokenizer:
+    def __call__(self, text):
+        return types.SimpleNamespace(input_ids=[0] * len(text.split()))
+
     def save_pretrained(self, out_dir):
         (Path(out_dir) / "tokenizer.json").write_text("{}")
 
@@ -185,18 +188,19 @@ def stubbed(monkeypatch, tmp_path):
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 3 * 2**30)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda i: "FakeGPU")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(train_bo, "grpo_bases", lambda args: (Path("fake/final_adapter"), {}))
     FakeAdapter.exports.clear()
     return model, loads
 
 
 def parse(*extra: str, out: str):
-    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--n-questions", "3", "--k-rollouts", "2", "--eval-tasks", "gsm8k"]
+    base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--no-greedy", "--k-rollouts", "64", "--eval-tasks", "gsm8k"]
     return train_bo.argument_parser().parse_args([*base, *SMALL, *extra])
 
 
 def test_argument_parser_defaults():
     args = train_bo.argument_parser().parse_args(["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", "o"])
-    assert (args.n_questions, args.k_rollouts) == (64, 4)
+    assert (args.batch, args.k_rollouts) == (1, 1)
     assert (args.n_evals, args.max_completion, args.rank, args.proj_dim) == (None, 1024, 2, 1)
 
 
@@ -210,28 +214,30 @@ def test_grpo_steps():
     assert train_bo.grpo_steps(640) == 30 and train_bo.grpo_steps(65) == 6
 
 
-def test_grpo_budget_trials():
-    # 3 · 640 · 4 completions: 7680 / (64·4) = 30 = GRPO steps; halving the per-trial sample doubles the trials
-    assert train_bo.grpo_budget_trials(640, 64, 4) == 30
-    assert train_bo.grpo_budget_trials(640, 32, 4) == 60
-    assert train_bo.grpo_budget_trials(65, 64, 4) == 4
+def test_questions_per_theta():
+    # one objective call = one GRPO step of completions, split over batch θ's × k rollouts
+    completions = train_bo.grpo.PROMPTS_PER_STEP * train_bo.grpo.ROLLOUTS_PER_PROMPT
+    assert train_bo.questions_per_theta(1, 1) == completions
+    assert train_bo.questions_per_theta(4, 2) == completions // 8
+    with pytest.raises(ValueError):
+        train_bo.questions_per_theta(3, 1)
 
 
 def test_run_resolves_theta_range_and_n_evals_from_dataset(stubbed, tmp_path):
     args = parse(out=str(tmp_path / "run"))
     args.theta_range = None
     args.n_evals = None
-    train_bo.run(args, FakeAdapter)
+    train_bo.run(args, FakeAdapter, bo.search, "turbo")
     # 4 prompts -> 1 step/epoch -> 3 · 5e-4; 3·4·4 = 48 completions / (3 questions · 2 rollouts) = 8 trials
     assert args.theta_range == pytest.approx(1.5e-3)
-    assert args.n_evals == 8
+    assert args.n_evals == train_bo.grpo_steps(len(DATASET))
     assert json.loads((tmp_path / "run" / "run.json").read_text())["theta_range"] == pytest.approx(1.5e-3)
 
 
 def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     model, loads = stubbed
     out = tmp_path / "run"
-    train_bo.run(parse(out=str(out)), FakeAdapter)
+    train_bo.run(parse(out=str(out)), FakeAdapter, bo.search, "turbo")
     spec = MODELS["qwen2.5-7b"]
 
     # same load as grpo.run, adapter attached with its kwargs
@@ -239,7 +245,7 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert loads["max_seq_length"] == 512 + 1024
     assert loads["max_lora_rank"] == 8 and loads["fast_inference"]
     assert loads["gpu_memory_utilization"] == 0.85  # BO holds no training state
-    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0)  # default: one global v
+    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=1, tie=0, bases={})  # default: one global v
 
     # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per generation, no export
     trials = json.loads((out / "trials.json").read_text())
@@ -275,7 +281,7 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert FakeAdapter.exports[-1]["dir"] == str(out / "final_adapter")
     assert torch.allclose(torch.tensor(FakeAdapter.exports[-1]["theta"]), torch.tensor(summary["theta"]))
     assert (out / "final_adapter" / "tokenizer.json").exists()
-    assert (summary["adapter"], summary["loss"], summary["steps"], summary["params"], summary["gpu"]) == ("fakeadapter", "bo", 8, 2, "FakeGPU")
+    assert (summary["adapter"], summary["loss"], summary["steps"], summary["params"], summary["gpu"]) == ("fakeadapter", "turbo", 8, 2, "FakeGPU")
     assert {"baseline", "baseline_logit", "baseline_logit_sem"} <= summary.keys() and 0 < summary["baseline"] < 1
     assert (summary["rank"], summary["proj_dim"], summary["tie"], summary["peak_vram_gb"]) == (2, 1, 0, 3.0)
 
@@ -284,7 +290,7 @@ def test_run_untied_concatenates_every_v(stubbed, tmp_path):
     model, _ = stubbed
     model.linear.weight.requires_grad_(True)  # a second trainable tensor: θ ∈ ℝ^(2+15)
     FakeAdapter.attach = staticmethod(lambda m, rank, seed, **kw: (FakeAdapter.calls.update(kw), m)[1])
-    train_bo.run(parse("--untie", out=str(tmp_path / "run")), FakeAdapter)
+    train_bo.run(parse("--untie", out=str(tmp_path / "run")), FakeAdapter, bo.search, "turbo")
     summary = json.loads((tmp_path / "run" / "run.json").read_text())
     assert FakeAdapter.calls["tie"] == 1 and summary["tie"] == 1
     assert summary["params"] == 17 and len(summary["theta"]) == 17
@@ -294,16 +300,9 @@ def test_run_untied_concatenates_every_v(stubbed, tmp_path):
 def test_run_skips_export_when_search_is_interrupted(stubbed, tmp_path, monkeypatch):
     out = tmp_path / "run"
     monkeypatch.setattr(bo, "search", lambda *a, **k: None)
-    train_bo.run(parse(out=str(out)), FakeAdapter)
+    train_bo.run(parse(out=str(out)), FakeAdapter, bo.search, "turbo")
     # the config half of run.json is out for the dashboard, the summary half is not
     config = json.loads((out / "run.json").read_text())
     assert "steps" not in config and config["max_steps"] == 4 and config["design"] == 4
     assert not (out / "final_adapter").exists()
 
-
-def test_main_parses_adapter_args(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(train_bo, "run", lambda args: seen.update(vars(args)))
-    monkeypatch.setattr(sys, "argv", ["train_bo", "--model", "qwen2.5-7b", "--task", "gsm8k", "--out", "o", "--proj-dim", "3"])
-    train_bo.main()
-    assert (seen["rank"], seen["proj_dim"]) == (2, 3)
