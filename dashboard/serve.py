@@ -1,4 +1,4 @@
-"""Serve the dashboard with live data from baseline evals (outputs/baselines/<model>/<task>.json.gz) and training runs (any outputs/**/run.json, incl. still-running ones): `uv run dashboard/serve.py`, then open http://localhost:8000."""
+"""Serve the dashboard with live data from baseline evals (outputs/runs/<family>/<model>/base/eval@K/<task>.json.gz) and training runs (any outputs/**/run.json, incl. still-running ones): `uv run dashboard/serve.py`, then open http://localhost:8000."""
 
 import argparse
 import gzip
@@ -15,8 +15,8 @@ from turbolora.tasks import TASKS
 
 TEMPLATE = Path(__file__).with_name("template.html")
 EVAL_TASKS = [t for t in TASKS if not t.startswith(("easy", "medium", "hard"))]
-# eval objective -> file suffix of `turbolora.eval` (<task><suffix>.json.gz, eval<suffix>.json); curve keys are eval<suffix>_<task>
-OBJECTIVES = {"greedy": dict(suffix="", label="Greedy"), "sampled": dict(suffix="@4", label="4 samples · T=1")}
+# eval objective -> eval dir of `turbolora.eval` (<snapshot>/eval@K/<task>.json.gz + summary.json); curve keys are <key>_<task>
+OBJECTIVES = {"greedy": dict(dir="eval@1", key="eval", label="Greedy"), "sampled": dict(dir="eval@4", key="eval@4", label="4 samples · T=1")}
 
 # metrics no card renders: the min/max envelopes, the raw reward mirrors and the duplicate length series
 CURVE_DROP = re.compile(
@@ -57,31 +57,31 @@ def load_curves(run_dir: Path) -> list[dict]:
     ]
 
 
-def task_files(snapshot: Path, suffix: str) -> dict[str, Path]:
-    """<task><suffix>.json.gz files of one eval objective, keyed by task."""
-    return {p.name.removesuffix(f"{suffix}.json.gz"): p for p in sorted(snapshot.glob(f"*{suffix}.json.gz")) if p.name.removesuffix(f"{suffix}.json.gz") in EVAL_TASKS}
+def task_files(snapshot: Path, eval_dir: str) -> dict[str, Path]:
+    """<task>.json.gz files of one eval objective (<snapshot>/<eval_dir>), keyed by task."""
+    return {p.stem.removesuffix(".json"): p for p in sorted((snapshot / eval_dir).glob("*.json.gz")) if p.stem.removesuffix(".json") in EVAL_TASKS}
 
 
-def last_full_eval(run_dir: Path, suffix: str) -> Path | None:
+def last_full_eval(run_dir: Path, eval_dir: str) -> Path | None:
     """The newest snapshot evaluated on every task any snapshot of this run has (a running job writes evals one task at a time)."""
-    evaluated = {s: set(task_files(s, suffix)) for s in by_step(run_dir.glob("snapshots/step-*"))}
+    evaluated = {s: set(task_files(s, eval_dir)) for s in by_step(run_dir.glob("snapshots/step-*"))}
     full = set().union(*evaluated.values()) if evaluated else set()
     complete = [s for s, done in evaluated.items() if done == full]
     return complete[-1] if complete and full else None
 
 
 def eval_curves(run_dir: Path) -> list[dict]:
-    """One eval<suffix>_<task> row per evaluated snapshot and objective, in the same shape as the training rows."""
+    """One <key>_<task> row per evaluated snapshot and objective, in the same shape as the training rows."""
     rows = []
     for snapshot in by_step(run_dir.glob("snapshots/step-*")):
         row = {"step": step_of(snapshot)}
         for obj in OBJECTIVES.values():
-            summary = snapshot / f"eval{obj['suffix']}.json"
+            summary = snapshot / obj["dir"] / "summary.json"
             if not summary.exists():
                 continue
             for task, stats in json.loads(summary.read_text()).items():
-                row[f"eval{obj['suffix']}_{task}"] = rnd(stats["accuracy"])
-                row[f"eval{obj['suffix']}_{task}_unparsed"] = stats["unparsed"]
+                row[f"{obj['key']}_{task}"] = rnd(stats["accuracy"])
+                row[f"{obj['key']}_{task}_unparsed"] = stats["unparsed"]
         if len(row) > 1:
             rows.append(row)
     return rows
@@ -233,10 +233,11 @@ def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
 def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: bool = False) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
-    for model_dir in sorted(baselines_dir.glob("*")):
+    for base_dir in sorted(baselines_dir.glob("*/*/base")):
+        model_dir = base_dir.parent
         if model_dir.name not in MODELS:
             continue
-        evals = {name: {task: load_task(p) for task, p in task_files(model_dir, obj["suffix"]).items()} for name, obj in OBJECTIVES.items()}
+        evals = {name: {task: load_task(p) for task, p in task_files(base_dir, obj["dir"]).items()} for name, obj in OBJECTIVES.items()}
         if any(evals.values()):
             models[model_dir.name] = dict(hf_id=MODELS[model_dir.name].hf_id, evals=evals)
 
@@ -252,8 +253,8 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: 
             summary |= dict(adapter=f"{summary['adapter']}-{summary['loss']}")
         evals, eval_step = {}, {}
         for name, obj in OBJECTIVES.items():
-            last = last_full_eval(run_dir, obj["suffix"])
-            evals[name] = {task: load_task(p) for task, p in task_files(last, obj["suffix"]).items()} if last else {}
+            last = last_full_eval(run_dir, obj["dir"])
+            evals[name] = {task: load_task(p) for task, p in task_files(last, obj["dir"]).items()} if last else {}
             if last:
                 eval_step[name] = step_of(last)
         curves = sorted(thin(load_curves(run_dir), curve_every) + eval_curves(run_dir), key=lambda row: row.get("step", 0))
@@ -295,7 +296,7 @@ class Dashboard(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baselines-dir", type=Path, default="outputs/baselines")
+    parser.add_argument("--baselines-dir", type=Path, default="outputs/runs", help="holds <family>/<model>/base/eval@K")
     parser.add_argument("--runs-dir", type=Path, default="outputs")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

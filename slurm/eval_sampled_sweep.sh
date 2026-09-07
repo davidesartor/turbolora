@@ -26,7 +26,7 @@ TASKS="gsm8k math500 aime24 amc23 minerva olympiad"
 SAMPLES=4
 EVAL="$HOME/.local/bin/uv run -m turbolora.eval --tasks $TASKS --samples $SAMPLES --skip-existing"
 
-complete() { [ "$(ls "$1"/*@$SAMPLES.json.gz 2>/dev/null | wc -l)" -ge 6 ]; }
+complete() { [ "$(ls "$1"/eval@$SAMPLES/*.json.gz 2>/dev/null | wc -l)" -ge 6 ]; }
 
 # last snapshot of every finished run (run.json carries train_hours) that still lacks any sampled task
 pending() {

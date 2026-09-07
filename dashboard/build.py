@@ -8,7 +8,7 @@ from serve import TEMPLATE, collect
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--baselines-dir", type=Path, default="outputs/baselines")
+    parser.add_argument("--baselines-dir", type=Path, default="outputs/runs", help="holds <family>/<model>/base/eval@K")
     parser.add_argument("--runs-dir", type=Path, default="outputs")
     parser.add_argument("--out", type=Path, default="dashboard/dashboard.html")
     parser.add_argument("--slim-every", type=int, default=25, help="curve step stride of the slim build; 0 to skip it")

@@ -59,14 +59,20 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
+def eval_dir(out_dir: Path, samples: int = 1) -> Path:
+    """Where the K-sample eval of a snapshot/baseline lives: <out_dir>/eval@K (K=1 greedy)."""
+    return out_dir / f"eval@{samples}"
+
+
 def write_result(
-    out_dir: Path, task: str, stats: dict, records: list[dict], suffix: str = "", **meta
+    out_dir: Path, task: str, stats: dict, records: list[dict], samples: int = 1, **meta
 ) -> None:
-    """<task><suffix>.json.gz holds every record; eval<suffix>.json accumulates the per-task stats (suffix "@K" for sampled evals)."""
+    """<out_dir>/eval@K/<task>.json.gz holds every record; eval@K/summary.json accumulates the per-task stats."""
+    out_dir = eval_dir(out_dir, samples)
     out_dir.mkdir(parents=True, exist_ok=True)
-    with gzip.open(out_dir / f"{task}{suffix}.json.gz", "wt", compresslevel=9) as f:
+    with gzip.open(out_dir / f"{task}.json.gz", "wt", compresslevel=9) as f:
         json.dump({"task": task, **meta, **stats, "records": records}, f)
-    summary_path = out_dir / f"eval{suffix}.json"
+    summary_path = out_dir / "summary.json"
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
     summary[task] = stats
     summary_path.write_text(json.dumps(summary, indent=1))
@@ -134,13 +140,13 @@ if __name__ == "__main__":
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
-        "--samples", type=int, default=1, help="completions per question; >1 samples at --temperature and writes <task>@K files"
+        "--samples", type=int, default=1, help="completions per question; >1 samples at --temperature; results go under eval@K"
     )
     parser.add_argument("--temperature", type=float, default=1.0, help="sampling temperature when --samples > 1 (GRPO rollouts use 1.0)")
     parser.add_argument("--tp", type=int, default=1, help="tensor parallel size (GPUs)")
     parser.add_argument(
         "--out-dir",
-        help="baselines: <out-dir>/<model>/<task>.json.gz (default outputs/baselines)",
+        help="baselines: <out-dir>/<family>/<model>/base/eval@K/<task>.json.gz (default outputs/runs)",
     )
     parser.add_argument(
         "--show", type=int, default=0, help="print first N completions per task"
@@ -148,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-existing",
         action="store_true",
-        help="leave already-written <task>.json.gz alone",
+        help="leave already-written eval@K/<task>.json.gz alone",
     )
     args = parser.parse_args()
 
@@ -183,7 +189,6 @@ if __name__ == "__main__":
         **lora,
     )
     sampled = args.samples > 1
-    suffix = f"@{args.samples}" if sampled else ""
     sampling = SamplingParams(
         n=args.samples,
         temperature=args.temperature if sampled else 0.0,
@@ -204,7 +209,7 @@ if __name__ == "__main__":
         ]
 
         for task in args.tasks:
-            out_path = out_dir / f"{task}{suffix}.json.gz"
+            out_path = eval_dir(out_dir, args.samples) / f"{task}.json.gz"
             if args.skip_existing and out_path.exists():
                 print(f"skipping {out_path}")
                 continue
@@ -225,7 +230,7 @@ if __name__ == "__main__":
             )
 
             write_result(
-                out_dir, task, stats, records, suffix, model=spec.hf_id, adapter=adapter, temperature=sampling.temperature
+                out_dir, task, stats, records, args.samples, model=spec.hf_id, adapter=adapter, temperature=sampling.temperature
             )
             print(f"wrote {out_path}")
 
