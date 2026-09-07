@@ -394,7 +394,7 @@ function pairedSearch(task, batch) {
   const byDir = new Map(runs.map(([id, r]) => [id, r]));
   return runs.flatMap(([id, r]) => {
     if (!r.bases || !r.tasks[task] || !trainOk(r) || state.hidden.has(modelLabel(r.model)) || (batch != null && batchOf(r) !== batch)) return [];
-    const grpoId = r.bases.replace(/^outputs\//, "").split("/snapshots/")[0], g = byDir.get(grpoId);
+    const grpoId = r.bases.replace(/^outputs\//, "").split(/\/(snapshots|final_adapter)\//)[0], g = byDir.get(grpoId);
     const base = DATA.models[r.model]?.tasks[task]?.accuracy;
     return g?.tasks[task] && base != null ? [{ id, run: r, grpo: g, grpoId, x: 100 * (g.tasks[task].accuracy - base), y: 100 * (r.tasks[task].accuracy - base), task }] : [];
   });
