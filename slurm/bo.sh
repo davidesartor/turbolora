@@ -36,4 +36,8 @@ trap 'kill -USR1 "$pid"' USR1 TERM
     --seed "$SEED" \
     "$@" &
 pid=$!
-while kill -0 "$pid" 2>/dev/null; do wait "$pid"; done
+# `wait` returns early on a trapped signal (128+sig, which `set -e` would treat as fatal and orphan python);
+# keep waiting until python actually exits, then propagate its real exit code
+status=0
+while kill -0 "$pid" 2>/dev/null; do wait "$pid" && status=0 || status=$?; done
+exit "$status"
