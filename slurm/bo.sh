@@ -1,6 +1,6 @@
 #!/bin/bash -l
-# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=r2-u1] [LOSS=turbo] sbatch slurm/bo.sh [--proj-dim 1 --untie ...]
-# CFG names the run dir (tinylora-<LOSS>[-<cfg>]); LOSS=bo (train_bo, default) or turbo (train_turbolora). Any bf16 card works: 1.5B fits 16G, 7B needs L4/A40+; on small cards lower --batch or --k-rollouts (completions per vLLM call = one GRPO step)
+# Seed array for a TuRBO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=r2-u1] sbatch slurm/bo.sh [--proj-dim 1 --untie ...]
+# CFG names the run dir (tinylora-turbo/<cfg>). Any bf16 card works: 1.5B fits 16G, 7B needs L4/A40+; on small cards lower --batch or --k-rollouts (completions per vLLM call = one GRPO step)
 #SBATCH -J bo
 #SBATCH -a 0-2
 #SBATCH -p gpu,gpu-preempt
@@ -26,15 +26,13 @@ export VLLM_CACHE_ROOT=/tmp/vllm
 MODEL="${MODEL:?}"
 TASK="${TASK:?}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
-LOSS="${LOSS:-bo}"
-case "$LOSS" in bo) trainer=train_bo ;; turbo) trainer=train_turbolora ;; *) echo "LOSS must be bo or turbo" >&2; exit 2 ;; esac
 
 # preemption sends TERM (900s grace), wall-limit sends USR1: python finishes the running trial and exits; trials.json resumes
 trap 'kill -USR1 "$pid"' USR1 TERM
-"$HOME/.local/bin/uv" run -m "turbolora.$trainer" \
+"$HOME/.local/bin/uv" run -m turbolora.train_turbolora \
     --model "$MODEL" \
     --task "$TASK" \
-    --out "outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-${LOSS}/${CFG:?}/seed${SEED}" \
+    --out "outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-turbo/${CFG:?}/seed${SEED}" \
     --seed "$SEED" \
     "$@" &
 pid=$!

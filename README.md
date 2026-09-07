@@ -10,7 +10,7 @@ Everything targets math reasoning (GSM8K / MATH-style tasks, graded with `math-v
 |---|---|---|
 | `lora` | A, B (rank r) | BA |
 | `loraxs` | R ∈ ℝ^{r×r} | UΣ R Vᵀ (frozen truncated SVD) |
-| `tinylora` | v ∈ ℝᵘ, one global v (default) or one per module (`--untie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or BO (`train_bo`) |
+| `tinylora` | v ∈ ℝᵘ, one global v (default) or one per module (`--untie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or TuRBO (`train_turbolora`) |
 
 All of them export as a standard PEFT LoRA dir so vLLM can eval them unchanged.
 
@@ -73,8 +73,10 @@ src/turbolora/
   adapters.py        adapter attach/export
   grpo.py            shared GRPO/GSPO trainer (Unsloth + TRL), preempt-safe checkpoints
   train_{lora,loraxs,tinylora}.py   GRPO entry points
-  bo.py              generic GP + Thompson-sampling search with heteroskedastic noise
-  train_bo.py        BO entry point (TinyLoRA, θ = every v concatenated; `--untie` for one v per module): objective = vLLM pass rate on a random train subset
+  bo.py              fixed-noise GP on logit pass rates, trial log, posterior-mean pick
+  turbo.py           TuRBO-1 trust-region search on bo.py's GP
+  train_bo.py        search objective (TinyLoRA θ = every v concatenated; `--untie` for one v per module): vLLM pass rate on a random train subset
+  train_turbolora.py TuRBO entry point (slurm/bo.sh)
   eval.py            greedy vLLM eval of a base model or a trained adapter
 slurm/               baseline.sh, train.sh, bo.sh, eval.sh
 dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
