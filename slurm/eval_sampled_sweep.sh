@@ -14,6 +14,7 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
+source slurm/family.sh
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
 # job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
@@ -39,11 +40,11 @@ next=$(pending | head -1)
 [ -z "$next" ] && { echo "nothing pending"; exit 0; }
 
 # one engine load serves a single base model: its untrained baseline first, then every pending adapter of that model
-model=$(cut -d/ -f3 <<< "$next")
-complete "outputs/baselines/$model" || $EVAL --model "$model"
+model=$(cut -d/ -f4 <<< "$next")
+complete "outputs/runs/$(family "$model")/$model/base" || $EVAL --model "$model"
 # the baseline's vLLM engine core releases the GPU a few seconds after the process exits; the next engine wants 90% of it
 until [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 2000 ]; do sleep 5; done
-adapters=$(pending | grep "^outputs/runs/$model/" | tr '\n' ' ')
+adapters=$(pending | grep "^outputs/runs/[^/]*/$model/" | tr '\n' ' ')
 echo "evaluating $(wc -w <<< "$adapters") adapters of $model"
 $EVAL --adapters $adapters
 

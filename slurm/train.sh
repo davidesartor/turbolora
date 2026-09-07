@@ -16,6 +16,7 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
+source slurm/family.sh
 module load cuda/13.1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HOME="$PWD/.hf-cache"
@@ -29,7 +30,7 @@ ADAPTER="${ADAPTER:?}"
 MODEL="${MODEL:?}"
 TASK="${TASK:?}"
 CFG="${CFG:-}"
-RUN="${ADAPTER}-${LOSS}${LR:+-lr$LR}${CFG:+-$CFG}"
+RUN="${ADAPTER}-${LOSS}/${CFG:?}${LR:+-lr$LR}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
 # preemption sends TERM (900s grace), wall-limit sends USR1: both ask python for a checkpoint
 trap 'kill -USR1 "$pid"' USR1 TERM
@@ -38,7 +39,7 @@ cmd=(
     --model "$MODEL"
     --task "$TASK"
     --loss "$LOSS"
-    --out "outputs/runs/${MODEL}/${TASK}/${RUN}/seed${SEED}"
+    --out "outputs/runs/$(family "$MODEL")/${MODEL}/${RUN}/seed${SEED}"
     --seed "$SEED"
 )
 if [ -n "$LR" ]; then

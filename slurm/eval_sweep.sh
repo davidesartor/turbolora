@@ -35,7 +35,7 @@ next=$(pending | head -1)
 
 # one engine load serves a single base model, so take every pending adapter of that model
 model=$(cut -d/ -f3 <<< "$next")
-adapters=$(pending | grep "^outputs/runs/$model/" | tr '\n' ' ')
+adapters=$(pending | grep "^outputs/runs/[^/]*/$model/" | tr '\n' ' ')
 echo "evaluating $(wc -w <<< "$adapters") adapters of $model"
 
 "$HOME/.local/bin/uv" run -m turbolora.eval --adapters $adapters --tasks $TASKS --skip-existing

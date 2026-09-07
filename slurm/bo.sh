@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=u1-notie] [LOSS=turbo] sbatch slurm/bo.sh [--proj-dim 1 --untie ...]
+# Seed array for a BO (TinyLoRA) run. Usage: MODEL=qwen2.5-7b TASK=gsm8k [CFG=r2-u1] [LOSS=turbo] sbatch slurm/bo.sh [--proj-dim 1 --untie ...]
 # CFG names the run dir (tinylora-<LOSS>[-<cfg>]); LOSS=bo (train_bo, default) or turbo (train_turbolora). Any bf16 card works: 1.5B fits 16G, 7B needs L4/A40+; on small cards lower --batch or --k-rollouts (completions per vLLM call = one GRPO step)
 #SBATCH -J bo
 #SBATCH -a 0-2
@@ -15,6 +15,7 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
+source slurm/family.sh
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
 # job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
@@ -33,7 +34,7 @@ trap 'kill -USR1 "$pid"' USR1 TERM
 "$HOME/.local/bin/uv" run -m "turbolora.$trainer" \
     --model "$MODEL" \
     --task "$TASK" \
-    --out "outputs/runs/${MODEL}/${TASK}/tinylora-${LOSS}${CFG:+-$CFG}/seed${SEED}" \
+    --out "outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-${LOSS}/${CFG:?}/seed${SEED}" \
     --seed "$SEED" \
     "$@" &
 pid=$!

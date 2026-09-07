@@ -75,7 +75,7 @@ def write_result(
 def resolve_run(
     model: str | None, adapter: str | None, out_dir: str | None
 ) -> tuple[str, Path]:
-    """Snapshot evals live in the snapshot dir (model read from the run's run.json); baselines go under out-dir/<model>."""
+    """Snapshot evals live in the snapshot dir (model read from the run's run.json); baselines are the `base` adapter: out-dir/<family>/<model>/base."""
     if adapter:
         run_dir = Path(adapter).parent.parent
         model = model or json.loads((run_dir / "run.json").read_text())["model"]

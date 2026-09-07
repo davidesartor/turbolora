@@ -34,7 +34,7 @@ TinyLoRA-paper recipe: 64 problems x 4 rollouts per optimizer step, 3 epochs, no
 10 warmup steps, AdamW-8bit, completions capped at 1024 tokens (`--max-completion`). Rollouts come from a
 colocated vLLM (~50% of VRAM); the base and adapter are kept in bf16. Prompts longer than 512 tokens are dropped
 (75 of 8,521 on `hard`) because the colocated vLLM path never truncates them. Runs are named
-`outputs/runs/<model>/<task>/<adapter>-<loss>-lr<lr>[-<cfg>]/seed<N>`; `run.json` holds the resolved config and
+`outputs/runs/<family>/<model>/<adapter>-<loss>/<cfg>[-lr<lr>]/seed<N>`; the train set is per model (`run.json` records it); `run.json` holds the resolved config and
 `checkpoint-*/` (every 25 steps) the curves the dashboard plots.
 
 ### Learning rates

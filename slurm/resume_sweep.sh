@@ -1,28 +1,27 @@
 #!/bin/bash -l
 # Resubmit every unfinished run (run.json lacks `steps`), one array per config with only the
 # missing seeds. Prints the sbatch lines; set GO=1 to actually submit.
-# Usage: [GO=1] [STAGGER=45] [SKIP=<run-name regex>] slurm/resume_sweep.sh
+# Usage: [GO=1] [STAGGER=45] [SKIP=<adapter-loss/cfg regex>] slurm/resume_sweep.sh
 set -e
 cd "$(dirname "$0")/.."
 
 STAGGER="${STAGGER:-45}"
 delay=0
 
-for run_dir in $(find outputs/runs -mindepth 3 -maxdepth 3 -type d | sort); do
-    IFS=/ read -r _ _ model task run <<< "$run_dir"
-    [ -n "$SKIP" ] && [[ "$run" =~ $SKIP ]] && continue
+for run_dir in $(find outputs/runs -mindepth 4 -maxdepth 4 -type d -path "*/*-*/r[0-9]*" | sort); do
+    IFS=/ read -r _ _ _ model run cfg <<< "$run_dir"
+    [ -n "$SKIP" ] && [[ "$run/$cfg" =~ $SKIP ]] && continue
 
     seeds=""
     for s in 0 1 2; do
         grep -q '"steps"' "$run_dir/seed$s/run.json" 2>/dev/null || seeds="$seeds,$s"
     done
     [ -z "$seeds" ] && continue
+    task=$(grep -o '"task": "[a-z]*"' "$run_dir"/seed*/run.json | head -1 | cut -d'"' -f4)
 
-    # run name is <adapter>-<loss>-<cfg>, cfg is r<rank>[-u<proj_dim>]
+    # run dir is <adapter>-<loss>/<cfg>, cfg is r<rank>[-u<proj_dim>][-b<batch>]
     adapter="${run%%-*}"
-    rest="${run#*-}"
-    loss="${rest%%-*}"
-    cfg="${rest#*-}"
+    loss="${run#*-}"
     rank="${cfg%%-*}"
     rank="${rank#r}"
     extra=(--rank "$rank")
@@ -32,9 +31,9 @@ for run_dir in $(find outputs/runs -mindepth 3 -maxdepth 3 -type d | sort); do
     begin=()
     [ "$delay" -gt 0 ] && begin=(--begin="now+${delay}seconds")
 
-    # tinylora-{bo,turbo}-u<proj_dim> runs go through bo.sh (rank stays its default); 7B needs a 24G+ card
+    # tinylora-{bo,turbo}/r<rank>-u<proj_dim>-b<batch> runs go through bo.sh; 7B needs a 24G+ card
     if [ "$loss" = bo ] || [ "$loss" = turbo ]; then
-        extra=(--proj-dim "${cfg#u}")
+        case "$cfg" in *-b*) extra+=(--batch "${cfg##*-b}") ;; esac
         case "$model" in qwen2.5-1.5b*) ;; *) begin+=(--constraint='l4|a40|l40s|a100-40g|a100-80g|h100') ;; esac
         script=slurm/bo.sh
     else

@@ -36,36 +36,37 @@ class ChatMLBoxedPrompt(Prompt):
 class Model(NamedTuple):
     hf_id: str
     prompt: Prompt
+    family: str  # dir grouping under outputs/runs
 
 
 MODELS: dict[str, Model] = {
     # QWEN
-    "qwen2.5-0.5b": Model("Qwen/Qwen2.5-0.5B", SimplePrompt()),
-    "qwen2.5-1.5b": Model("Qwen/Qwen2.5-1.5B", SimplePrompt()),
-    "qwen2.5-3b": Model("Qwen/Qwen2.5-3B", ChatMLBoxedPrompt()),
-    "qwen2.5-7b": Model("Qwen/Qwen2.5-7B", ChatMLBoxedPrompt()),
-    "qwen2.5-14b": Model("Qwen/Qwen2.5-14B", ChatMLBoxedPrompt()),
-    "qwen2.5-32b": Model("Qwen/Qwen2.5-32B", ChatMLBoxedPrompt()),
+    "qwen2.5-0.5b": Model("Qwen/Qwen2.5-0.5B", SimplePrompt(), "qwen2.5"),
+    "qwen2.5-1.5b": Model("Qwen/Qwen2.5-1.5B", SimplePrompt(), "qwen2.5"),
+    "qwen2.5-3b": Model("Qwen/Qwen2.5-3B", ChatMLBoxedPrompt(), "qwen2.5"),
+    "qwen2.5-7b": Model("Qwen/Qwen2.5-7B", ChatMLBoxedPrompt(), "qwen2.5"),
+    "qwen2.5-14b": Model("Qwen/Qwen2.5-14B", ChatMLBoxedPrompt(), "qwen2.5"),
+    "qwen2.5-32b": Model("Qwen/Qwen2.5-32B", ChatMLBoxedPrompt(), "qwen2.5"),
     # QWEN (instruct)
-    "qwen2.5-0.5b-instruct": Model("Qwen/Qwen2.5-0.5B-Instruct", ChatMLBoxedPrompt()),
-    "qwen2.5-1.5b-instruct": Model("Qwen/Qwen2.5-1.5B-Instruct", ChatMLBoxedPrompt()),
-    "qwen2.5-3b-instruct": Model("Qwen/Qwen2.5-3B-Instruct", ChatMLBoxedPrompt()),
-    "qwen2.5-7b-instruct": Model("Qwen/Qwen2.5-7B-Instruct", ChatMLBoxedPrompt()),
-    "qwen2.5-14b-instruct": Model("Qwen/Qwen2.5-14B-Instruct", ChatMLBoxedPrompt()),
-    "qwen2.5-32b-instruct": Model("Qwen/Qwen2.5-32B-Instruct", ChatMLBoxedPrompt()),
+    "qwen2.5-0.5b-instruct": Model("Qwen/Qwen2.5-0.5B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
+    "qwen2.5-1.5b-instruct": Model("Qwen/Qwen2.5-1.5B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
+    "qwen2.5-3b-instruct": Model("Qwen/Qwen2.5-3B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
+    "qwen2.5-7b-instruct": Model("Qwen/Qwen2.5-7B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
+    "qwen2.5-14b-instruct": Model("Qwen/Qwen2.5-14B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
+    "qwen2.5-32b-instruct": Model("Qwen/Qwen2.5-32B-Instruct", ChatMLBoxedPrompt(), "qwen2.5-instruct"),
     # QWEN (math)
-    "qwen2.5-1.5b-math": Model("Qwen/Qwen2.5-Math-1.5B", ChatMLBoxedPrompt()),
-    "qwen2.5-7b-math": Model("Qwen/Qwen2.5-Math-7B", ChatMLBoxedPrompt()),
+    "qwen2.5-1.5b-math": Model("Qwen/Qwen2.5-Math-1.5B", ChatMLBoxedPrompt(), "qwen2.5-math"),
+    "qwen2.5-7b-math": Model("Qwen/Qwen2.5-Math-7B", ChatMLBoxedPrompt(), "qwen2.5-math"),
     # LLaMA
-    "llama3.2-1b": Model("meta-llama/Llama-3.2-1B", SimplePrompt()),
-    "llama3.2-3b": Model("meta-llama/Llama-3.2-3B", SimplePrompt()),
-    "llama3.1-8b": Model("meta-llama/Llama-3.1-8B", SimplePrompt()),
+    "llama3.2-1b": Model("meta-llama/Llama-3.2-1B", SimplePrompt(), "llama"),
+    "llama3.2-3b": Model("meta-llama/Llama-3.2-3B", SimplePrompt(), "llama"),
+    "llama3.1-8b": Model("meta-llama/Llama-3.1-8B", SimplePrompt(), "llama"),
     # MISTRAL
-    "ministral3-3b": Model("mistralai/Ministral-3-3B-Base-2512", SimplePrompt()),
-    "ministral3-8b": Model("mistralai/Ministral-3-8B-Base-2512", ChatMLBoxedPrompt()),
-    "ministral3-14b": Model("mistralai/Ministral-3-14B-Base-2512", ChatMLBoxedPrompt()),
-    "mixtral-8x7b": Model("mistralai/Mixtral-8x7B-v0.1", ChatMLBoxedPrompt()),
+    "ministral3-3b": Model("mistralai/Ministral-3-3B-Base-2512", SimplePrompt(), "mistral"),
+    "ministral3-8b": Model("mistralai/Ministral-3-8B-Base-2512", ChatMLBoxedPrompt(), "mistral"),
+    "ministral3-14b": Model("mistralai/Ministral-3-14B-Base-2512", ChatMLBoxedPrompt(), "mistral"),
+    "mixtral-8x7b": Model("mistralai/Mixtral-8x7B-v0.1", ChatMLBoxedPrompt(), "mistral"),
     # DEEPSEEK
-    "deepseek-7b": Model("deepseek-ai/deepseek-llm-7b-base", ChatMLBoxedPrompt()),
-    "deepseek-7b-math": Model("deepseek-ai/deepseek-math-7b-base", ChatMLBoxedPrompt()),
+    "deepseek-7b": Model("deepseek-ai/deepseek-llm-7b-base", ChatMLBoxedPrompt(), "deepseek"),
+    "deepseek-7b-math": Model("deepseek-ai/deepseek-math-7b-base", ChatMLBoxedPrompt(), "deepseek"),
 }

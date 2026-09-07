@@ -15,6 +15,7 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
+source slurm/family.sh
 module load cuda/13.1
 export HF_HOME="$PWD/.hf-cache"
 # job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
@@ -31,7 +32,7 @@ trap 'kill -USR1 "$pid"' USR1 TERM
 "$HOME/.local/bin/uv" run -m turbolora.train_punylora \
     --model "$MODEL" \
     --task "$TASK" \
-    --out "outputs/runs/${MODEL}/${TASK}/punylora${CFG:+-$CFG}/seed${SEED}" \
+    --out "outputs/runs/$(family "$MODEL")/${MODEL}/punylora/${CFG:?}/seed${SEED}" \
     --seed "$SEED" \
     "$@" &
 pid=$!
