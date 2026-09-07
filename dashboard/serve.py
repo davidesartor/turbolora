@@ -241,7 +241,7 @@ def load_progress(run_dir: Path, summary: dict, curves: list[dict]) -> dict:
     return progress
 
 
-def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: bool = False) -> dict:
+def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: bool = False, slim: bool = False) -> dict:
     """Baselines keyed by model name, training runs keyed by path relative to runs_dir."""
     models = {}
     for base_dir in sorted(baselines_dir.glob("*/*/base")):
@@ -278,6 +278,15 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: 
     questions: dict[tuple[str, str], int] = {}
     for stats in [t for r in [*runs.values(), *ordered.values()] for e in r["evals"].values() for t in e.values()]:
         stats["misses"] = [[questions.setdefault((m["question"], m["answer"]), len(questions)), m["predicted"]] for m in stats["misses"]]
+
+    # the slim build keeps only what the charts draw: θ₀ per trial (the 1-D plot) and the miss counts, not the misses
+    if slim:
+        for stats in [t for r in [*runs.values(), *ordered.values()] for e in r["evals"].values() for t in e.values()]:
+            del stats["misses"]
+        for r in runs.values():
+            for t in r.get("bo", {}).get("trials", []):
+                t["dim"], t["theta"] = len(t["theta"]), t["theta"][:1]
+        questions = {}
 
     return dict(models=ordered, runs=runs, questions=[list(qa) for qa in questions], tasks=EVAL_TASKS, objectives=OBJECTIVES)
 

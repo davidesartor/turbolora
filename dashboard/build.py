@@ -1,4 +1,4 @@
-"""Bind the current data into standalone, shareable HTML snapshots: `uv run dashboard/build.py` -> dashboard/dashboard.html plus a curve-thinned dashboard-slim.html."""
+"""Bind the current data into standalone, shareable HTML snapshots: `uv run dashboard/build.py` -> dashboard/dashboard.html plus a dashboard-slim.html without misses and full θ vectors."""
 
 import argparse
 import json
@@ -19,6 +19,6 @@ if __name__ == "__main__":
     if args.slim_every:
         builds.append((args.out.with_name(f"{args.out.stem}-slim{args.out.suffix}"), args.slim_every))
     for out, every in builds[::-1]:
-        payload = json.dumps(collect(args.baselines_dir, args.runs_dir, every, wait_gp=True)).replace("</", "<\\/")
+        payload = json.dumps(collect(args.baselines_dir, args.runs_dir, every, wait_gp=True, slim=every > 1)).replace("</", "<\\/")
         out.write_text(template.replace("/*__DATA__*/null", payload))
         print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
