@@ -28,8 +28,19 @@ by_step = lambda paths: sorted(paths, key=step_of)
 rnd = lambda v, digits=4: float(f"{v:.{digits}g}")
 
 
+TASK_CACHE: dict[tuple[Path, int], dict] = {}
+
+
 def load_task(path: Path) -> dict:
-    """Stats for one <task>.json.gz plus wrong-or-unparsed examples (questions truncated, completions dropped)."""
+    """Stats for one <task>.json.gz plus wrong-or-unparsed examples (questions truncated, completions dropped); cached per mtime."""
+    key = (path, path.stat().st_mtime_ns)
+    if key not in TASK_CACHE:
+        TASK_CACHE[key] = read_task(path)
+    # collect() rewrites each miss in place when pooling questions: hand out copies
+    return TASK_CACHE[key] | dict(misses=[dict(m) for m in TASK_CACHE[key]["misses"]])
+
+
+def read_task(path: Path) -> dict:
     with gzip.open(path, "rt") as f:
         data = json.load(f)
     misses = [

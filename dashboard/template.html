@@ -197,7 +197,7 @@ const runs = Object.entries(DATA.runs ?? {});
 // `tasks` follows the eval-objective toggle: the accuracies of whichever objective is selected
 const objectives = DATA.objectives ?? { greedy: { suffix: "", label: "Greedy" } };
 for (const r of [...Object.values(DATA.models), ...Object.values(DATA.runs ?? {})]) Object.defineProperty(r, "tasks", { get: () => r.evals?.[state.obj] ?? {} });
-const evalPrefix = () => `eval${objectives[state.obj].suffix}_`;
+const evalPrefix = () => `${objectives[state.obj].key}_`;
 const trainSets = ["easy", "medium", "hard"];
 const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter);
 const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Math.round(55 * j / (n - 1))}%)` : c;
