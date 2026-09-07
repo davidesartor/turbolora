@@ -10,3 +10,5 @@ dashboard/dashboard.html
 dashboard/dashboard-slim.html
 tmp/
 dashboard/.gp-cache/
+grpo_trainer_lora_model_*/
+unsloth_compiled_cache/
