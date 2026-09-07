@@ -121,7 +121,7 @@ def search(
     Batches: the initial design (θ=0 replicates, then Sobol) in chunks of `batch`, then `n_evals` Thompson batches (one
     posterior draw per row). Each trial's sem² is taken as its observation noise. Resumes from the log; a SIGUSR1/SIGTERM
     finishes the running batch and returns None. `on_snapshot(step, pick)` fires after GP-guided batch 1, 2, 4, ... and
-    the last with the current pick.
+    the last with the current pick; the last one is the returned pick (a GP refit could choose differently).
     """
     trials_path = out / "trials.json"
     trials: list[dict] = (
@@ -143,6 +143,7 @@ def search(
 
     # slurm preemption/wall-limit signal: finish the running batch, then leave the loop
     stop = argparse.Namespace(requested=False)
+    final_pick: tuple[dict, float] | None = None
     for sig in (signal.SIGUSR1, signal.SIGTERM):
         signal.signal(sig, lambda *_: setattr(stop, "requested", True))
     # logs predating the batch axis were sequential: their trial index is their batch index
@@ -176,13 +177,17 @@ def search(
         print(f"batch {b}: best {batch_best:.4f} over {len(results)} θ's (best so far {best:.4f})")
         # snapshot steps count GP-guided batches only: the θ=0 replicates and the Sobol design are the initial design
         step = b + 1 - len(design_batches)
-        if on_snapshot and step >= 1 and (not step & (step - 1) or step == args.n_evals):
-            on_snapshot(step, pick(trials)[0])
+        if step >= 1 and (not step & (step - 1) or step == args.n_evals):
+            current = pick(trials)
+            if on_snapshot:
+                on_snapshot(step, current[0])
+            if step == args.n_evals:
+                final_pick = current
     if stop.requested:
         print("stopped on signal; rerun to resume")
         return None
 
-    chosen, posterior_mean = pick(trials)
+    chosen, posterior_mean = final_pick or pick(trials)
     baseline = torch.tensor([t["value"] for t in trials if t["baseline"]])
     baseline_sem = baseline.std(unbiased=len(baseline) > 1) / len(baseline) ** 0.5
     print(
