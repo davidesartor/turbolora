@@ -12,7 +12,7 @@ from unsloth import FastLanguageModel  # must import before trl/transformers
 
 import torch
 from safetensors.torch import load_file, save_file
-from transformers import TrainerCallback
+from transformers import AutoConfig, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer
 from vllm import SamplingParams
@@ -27,6 +27,19 @@ R_STEP_NORM = 1e-3
 PROMPTS_PER_STEP = 64
 ROLLOUTS_PER_PROMPT = 4
 MAX_PROMPT_LENGTH = 512  # 75 of 8521 hard prompts exceed it and are dropped
+
+
+def patch_config_pad_token(hf_id: str, pad_token_id: int):
+    """Unsloth synthesizes (and then rejects) a pad token unless the model config already declares one."""
+    from_pretrained = AutoConfig.from_pretrained
+
+    def from_pretrained_with_pad(name, *args, **kwargs):
+        config = from_pretrained(name, *args, **kwargs)
+        if name == hf_id:
+            config.pad_token_id = pad_token_id
+        return config
+
+    AutoConfig.from_pretrained = from_pretrained_with_pad
 
 
 def load_model(
@@ -44,6 +57,9 @@ def load_model(
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
     if vllm_share is None:
         vllm_share = 0.5 if vram_gb < 60 else 0.45
+    if spec.pad_token_id is not None:
+        patch_config_pad_token(spec.hf_id, spec.pad_token_id)
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=spec.hf_id,
         max_seq_length=MAX_PROMPT_LENGTH + max_completion,

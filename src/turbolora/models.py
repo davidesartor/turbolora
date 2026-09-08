@@ -37,6 +37,8 @@ class Model(NamedTuple):
     hf_id: str
     prompt: Prompt
     family: str  # dir grouping under outputs/runs
+    pad_token_id: int | None = None  # for tokenizers offering neither a pad nor an unk token
+
 
 
 MODELS: dict[str, Model] = {
@@ -62,11 +64,12 @@ MODELS: dict[str, Model] = {
     "llama3.2-3b": Model("meta-llama/Llama-3.2-3B", SimplePrompt(), "llama"),
     "llama3.1-8b": Model("meta-llama/Llama-3.1-8B", SimplePrompt(), "llama"),
     # MISTRAL
+    "mistral-7b": Model("mistralai/Mistral-7B-v0.1", SimplePrompt(), "mistral"),
     "ministral3-3b": Model("mistralai/Ministral-3-3B-Base-2512", SimplePrompt(), "mistral"),
     "ministral3-8b": Model("mistralai/Ministral-3-8B-Base-2512", ChatMLBoxedPrompt(), "mistral"),
     "ministral3-14b": Model("mistralai/Ministral-3-14B-Base-2512", ChatMLBoxedPrompt(), "mistral"),
     "mixtral-8x7b": Model("mistralai/Mixtral-8x7B-v0.1", ChatMLBoxedPrompt(), "mistral"),
     # DEEPSEEK
-    "deepseek-7b": Model("deepseek-ai/deepseek-llm-7b-base", ChatMLBoxedPrompt(), "deepseek"),
-    "deepseek-7b-math": Model("deepseek-ai/deepseek-math-7b-base", ChatMLBoxedPrompt(), "deepseek"),
+    "deepseek-7b": Model("deepseek-ai/deepseek-llm-7b-base", ChatMLBoxedPrompt(), "deepseek", 100000),
+    "deepseek-7b-math": Model("deepseek-ai/deepseek-math-7b-base", ChatMLBoxedPrompt(), "deepseek", 100000),
 }
