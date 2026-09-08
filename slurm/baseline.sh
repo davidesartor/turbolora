@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Baseline eval of untrained models (short QOS). Usage: MODEL="qwen2.5-7b qwen2.5-7b-math" [TASKS="gsm8k math500"] [SAMPLES=4] [SHOW=5] sbatch slurm/baseline.sh
+# Baseline eval of untrained models (short QOS). Usage: MODEL="qwen2.5-7b qwen2.5-7b-math" [TASKS="gsm8k math500"] [SAMPLES="1 4"] [SHOW=5] sbatch slurm/baseline.sh
 #SBATCH -J baseline
 #SBATCH -p gpu-preempt
 #SBATCH --qos=short
@@ -26,6 +26,8 @@ release_gpu() {
 }
 
 for model in ${MODEL:?}; do
-    uv run -m turbolora.eval --model "$model" --tasks ${TASKS:-gsm8k} --samples "${SAMPLES:-1}" --skip-existing ${SHOW:+--show $SHOW} --tp "${TP:-1}"
-    release_gpu
+    for samples in ${SAMPLES:-1}; do
+        uv run -m turbolora.eval --model "$model" --tasks ${TASKS:-gsm8k} --samples "$samples" --skip-existing ${SHOW:+--show $SHOW} --tp "${TP:-1}"
+        release_gpu
+    done
 done
