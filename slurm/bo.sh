@@ -26,13 +26,16 @@ export VLLM_CACHE_ROOT=/tmp/vllm
 MODEL="${MODEL:?}"
 TASK="${TASK:?}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
+OUT="outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-turbo/${CFG:?}/seed${SEED}"
+# tag the job with its run dir so resume_sweep.sh can see which seeds are already queued
+scontrol update job="$SLURM_JOB_ID" comment="$OUT" || true
 
 # preemption sends TERM (900s grace), wall-limit sends USR1: python finishes the running trial and exits; trials.json resumes
 trap 'kill -USR1 "$pid"' USR1 TERM
 "$HOME/.local/bin/uv" run -m turbolora.train_turbolora \
     --model "$MODEL" \
     --task "$TASK" \
-    --out "outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-turbo/${CFG:?}/seed${SEED}" \
+    --out "$OUT" \
     --seed "$SEED" \
     "$@" &
 pid=$!

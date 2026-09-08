@@ -32,6 +32,9 @@ TASK="${TASK:?}"
 CFG="${CFG:-}"
 RUN="${ADAPTER}-${LOSS}/${CFG:?}${LR:+-lr$LR}"
 SEED="${SLURM_ARRAY_TASK_ID:?}"
+OUT="outputs/runs/$(family "$MODEL")/${MODEL}/${RUN}/seed${SEED}"
+# tag the job with its run dir so resume_sweep.sh can see which seeds are already queued
+scontrol update job="$SLURM_JOB_ID" comment="$OUT" || true
 # preemption sends TERM (900s grace), wall-limit sends USR1: both ask python for a checkpoint
 trap 'kill -USR1 "$pid"' USR1 TERM
 cmd=(
@@ -39,7 +42,7 @@ cmd=(
     --model "$MODEL"
     --task "$TASK"
     --loss "$LOSS"
-    --out "outputs/runs/$(family "$MODEL")/${MODEL}/${RUN}/seed${SEED}"
+    --out "$OUT"
     --seed "$SEED"
 )
 if [ -n "$LR" ]; then
