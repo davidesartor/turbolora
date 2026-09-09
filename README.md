@@ -53,16 +53,19 @@ diverged. Since all these adapters share the same frozen U, Σ, Vᵀ, equal ‖�
 
 ### Sweeps (3 seeds each)
 
-| models | task | `lora` r | `loraxs` r | `tinylora` r2, tied, u |
-|---|---|---|---|---|
-| Qwen2.5-1.5B | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
-| Qwen2.5-1.5B-Instruct, -Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
-| Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 |
-| Qwen2.5-3B | hard | — | 1, 2 | 1, 4, 16, 32 |
+| models | task | `lora` r | `loraxs` r | `tinylora-grpo` u | `tinylora-turbo` u |
+|---|---|---|---|---|---|
+| Qwen2.5-1.5B, -Instruct, -Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 | 1, 2, 4, 16, 64, 256 x b1, b4 |
+| Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 16, 64, 256 | 1, 2, 4, 16, 64, 256 x b1, b4 |
+| Llama-3.1-8B, Mistral-7B, DeepSeek-7B-Math | hard | — | — | 1, 4, 16 | 1, 4, 16, b1 only |
+
+`tinylora` is always r=2 tied; b in the turbo column is `--batch`. Every one of the 24 models in `models.py`
+also has an untrained baseline (all six eval tasks at eval@1 and eval@4), including the ones no adapter was
+trained on.
 
 Early `tinylora` u1024 extras (1.5B done, 7B partial) were moved to `tmp/u1024-runs/` on 2026-09-06; not part of the grid.
 
-Not yet launched for 3B: `lora` r1/2/8/32, `loraxs` r8/32 and `tinylora` u256 (held back on 2026-09-03 to save GPU hours).
+Qwen2.5-3B has baselines only: no training run of any adapter was ever launched for it (held back on 2026-09-03 to save GPU hours).
 
 ## Layout
 
@@ -78,7 +81,8 @@ src/turbolora/
   train_bo.py        search objective (TinyLoRA θ = every v concatenated; `--untie` for one v per module): vLLM pass rate on a random train subset
   train_turbolora.py TuRBO entry point (slurm/bo.sh)
   eval.py            greedy vLLM eval of a base model or a trained adapter
-slurm/               baseline.sh, train.sh, bo.sh, eval.sh
+slurm/               baseline.sh, train.sh, bo.sh, eval.sh; sweep drivers resume_sweep.sh,
+                     eval_sweep.sh, eval_sampled_sweep.sh and watchdogs *_watch.sh
 dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
                      uv run dashboard/build.py -> standalone dashboard.html snapshot to share
 tests/
@@ -107,6 +111,10 @@ MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --untie
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
 ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
 sbatch slurm/eval_sweep.sh   # every snapshot with a PEFT export that lacks any of the 6 tasks
+MODEL=qwen2.5-7b sbatch slurm/eval_sampled_sweep.sh   # eval@4 of that model's base + last snapshots
+
+# resubmit every run whose run.json lacks `steps`, skipping seeds already queued
+GO=1 slurm/resume_sweep.sh
 
 # locally / interactively
 uv run -m turbolora.train_tinylora --model qwen2.5-7b --task hard --out outputs/runs/x --max-steps 3
@@ -125,8 +133,19 @@ Jobs run on `gpu-preempt` with requeue; training checkpoints on SIGTERM/SIGUSR1 
 
 ## Pending: SVD sign consistency of pre-fix requeued runs
 
-The frozen SVD bases (`loraxs`, `tinylora`) are recomputed at every (re)start, and `torch.linalg.svd` picks singular-vector signs per GPU type (A100-80G/A16/L4 agree, L40S differs). Before the sign pin in `adapters.py` (2026-09-07), a run requeued onto a different family kept training `R`/`v` against flipped `U`, so its export and its snapshots are in inconsistent spaces. Runs are classified in `tmp/run-audit-2026-09-07-final.csv` (109 clean, 49 unclean, 22 `loraxs` undecidable). Unclean `tinylora` runs are kept: the turbo twin, the export and the eval all pin to the same `lora_B`, so they stay consistent. The `loraxs` verdicts are still open because the H100, A40 and A100-40G sign families are not measured yet. To finish:
+The frozen SVD bases (`loraxs`, `tinylora`) are recomputed at every (re)start, and `torch.linalg.svd` picks
+singular-vector signs per GPU model. Before the sign pin in `adapters.py` (2026-09-07), a run requeued onto a
+different card kept training `R`/`v` against flipped `U`, so its export and its snapshots are in inconsistent
+spaces. Runs are classified in `tmp/run-audit-2026-09-07-final.csv` (109 clean, 49 unclean, 22 `loraxs`
+undecidable). Unclean `tinylora` runs are kept: the turbo twin, the export and the eval all pin to the same
+`lora_B`, so they stay consistent.
 
-1. Run `sbatch --constraint=<card> tmp/svd-signs/job.sh` for `h100`, `a40`, `a100-40g` (queued as jobs 64045795/97/99 and 64045870/71/72, 64047600 on 2026-09-07). Each SVDs layer-0 weights of the 6 models on that card and saves `tmp/svd-signs/<gpu>.pt`.
-2. `uv run tmp/svd-signs/compare.py` prints pairwise sign flips between cards; cards with zero flips are one family.
-3. For each undecidable run, map its requeue history (node → card → family, from `sacct -j <id> -o JobID,NodeList,Start`) and mark it clean if every instance ran in one family, otherwise unclean. Update the csv and the memory note.
+All seven cards have now been SVD'd (`tmp/svd-signs/<gpu>.pt`, one job per `--constraint`), and there are no
+sign families beyond A100-PCIE-40G = A100-SXM4-80G: every other pair of cards flips 6-13 of the 84 measured
+singular vectors, though the factors themselves agree to ~2e-3. So an undecidable run is clean only if every
+one of its instances ran on the same card model. To finish:
+
+1. Re-measure A16 — its `.pt` predates `svd_signs.py` (196 matrices of one model, not layer 0 of the six) and
+   `compare.py` chokes on the mismatched keys, so it is excluded from the comparison above.
+2. For each undecidable run, map its requeue history (node -> card, from `sacct -j <id> -o JobID,NodeList,Start`)
+   and mark it clean if every instance ran on one card model, otherwise unclean. Update the csv and the memory note.
