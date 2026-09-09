@@ -291,10 +291,25 @@ def collect(baselines_dir: Path, runs_dir: Path, curve_every: int = 1, wait_gp: 
     return dict(models=ordered, runs=runs, questions=[list(qa) for qa in questions], tasks=EVAL_TASKS, objectives=OBJECTIVES)
 
 
+# a full scan costs minutes, and every open tab polls /version: serve one scan to all requests and refresh it at most this often
+SCAN_TTL = 300
+scan_lock = threading.Lock()
+scan = dict(at=0.0, payload="", version="")
+
+
+def scanned() -> tuple[str, str]:
+    """The collected payload and its version hash, rescanned only once the cached one is older than SCAN_TTL."""
+    with scan_lock:
+        if time.time() - scan["at"] > SCAN_TTL:
+            scan["payload"] = json.dumps(collect(args.baselines_dir, args.runs_dir)).replace("</", "<\\/")
+            scan["version"] = hashlib.md5(scan["payload"].encode()).hexdigest()
+            scan["at"] = time.time()
+        return scan["payload"], scan["version"]
+
+
 class Dashboard(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        payload = json.dumps(collect(args.baselines_dir, args.runs_dir)).replace("</", "<\\/")
-        version = hashlib.md5(payload.encode()).hexdigest()
+        payload, version = scanned()
         if self.path == "/version":
             body, ctype = version.encode(), "text/plain"
         else:
