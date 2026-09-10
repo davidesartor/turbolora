@@ -153,6 +153,9 @@ tr.grp .chev { display: inline-block; width: 14px; color: var(--muted); }
     </div></div>
     <div class="control" id="train-control"><span class="eyebrow">Trained on</span><div class="toggle" id="train"></div></div>
     <div class="control"><span class="eyebrow">Eval</span><div class="toggle" id="obj"></div></div>
+    <div class="control"><span class="eyebrow">Runs</span><div class="toggle" id="runs">
+      <button type="button" data-r="all">All</button><button type="button" data-r="done">Finished only</button>
+    </div></div>
   </div>
 </header>
 
@@ -200,14 +203,14 @@ const objectives = DATA.objectives ?? { greedy: { suffix: "", label: "Greedy" } 
 for (const r of [...Object.values(DATA.models), ...Object.values(DATA.runs ?? {})]) Object.defineProperty(r, "tasks", { get: () => r.evals?.[state.obj] ?? {} });
 const evalPrefix = () => `${objectives[state.obj].key}_`;
 const trainSets = ["easy", "medium", "hard"];
-const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter);
+const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter) && (state.runs === "all" || r.status !== "running");
 const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Math.round(55 * j / (n - 1))}%)` : c;
 const color = (i) => PALETTE[i % PALETTE.length];
 
 // ---- state: view + x axis persist per viewer, tab lives in the hash, hidden/expanded last the session
-const state = { view: "dataset", x: "params", train: "all", obj: "greedy", pairBatch: 1, pairZoom: 0, pairStep: 99, hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
+const state = { view: "dataset", x: "params", train: "all", obj: "greedy", runs: "all", pairBatch: 1, pairZoom: 0, pairStep: 99, pairULo: 0, pairUHi: 99, hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("turbolora-curves") ?? "{}"), { hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() }); } catch {}
-const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj, pairBatch: state.pairBatch })); } catch {} };
+const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj, runs: state.runs, pairBatch: state.pairBatch })); } catch {} };
 // models with no training runs start hidden in the chart; the legend brings them back
 const modelsWithRuns = new Set(runs.map(([, r]) => r.model));
 for (const m of models) if (!modelsWithRuns.has(m)) state.hidden.add(modelLabel(m));
@@ -239,6 +242,7 @@ function seriesFor(view, tab) {
 function renderControls() {
   for (const b of document.querySelectorAll("#view button")) b.classList.toggle("on", b.dataset.v === state.view);
   for (const b of document.querySelectorAll("#xaxis button")) b.classList.toggle("on", b.dataset.x === state.x);
+  for (const b of document.querySelectorAll("#runs button")) b.classList.toggle("on", b.dataset.r === state.runs);
   if (!objectives[state.obj]) state.obj = "greedy";
   $("#obj").innerHTML = Object.entries(objectives).map(([k, o]) => `<button type="button" data-o="${esc(k)}" class="${k === state.obj ? "on" : ""}">${esc(o.label)}</button>`).join("");
   $("#objective-line").textContent = `${objectives[state.obj].label} pass@1 · vLLM · math-verify grading`;
@@ -252,6 +256,7 @@ $("#train").addEventListener("click", (e) => { const b = e.target.closest("butto
 $("#obj").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.obj = b.dataset.o; persist(); render(); });
 document.addEventListener("click", (e) => { const b = e.target.closest("#pair-batch button"); if (!b) return; state.pairBatch = +b.dataset.b; persist(); render(); });
 $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.x = b.dataset.x; persist(); render(); });
+$("#runs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.runs = b.dataset.r; persist(); render(); });
 window.addEventListener("hashchange", render);
 
 // ---- the chart
@@ -403,28 +408,39 @@ function pairStepAt(steps) {
   state.pairStep = Math.min(Math.max(state.pairStep, 0), steps.length);
   return state.pairStep < steps.length ? steps[state.pairStep] : null;
 }
-function pairedSearch(task, batch, step) {
+function pairedSearch(task, batch, step, us) {
   const byDir = new Map(runs.map(([id, r]) => [id, r]));
   return runs.flatMap(([id, r]) => {
     if (!r.bases || !r.tasks[task] || !trainOk(r) || state.hidden.has(modelLabel(r.model)) || (batch != null && batchOf(r) !== batch)) return [];
+    if (us && (r.proj_dim < us[0] || r.proj_dim > us[1])) return [];
     const grpoId = r.bases.replace(/^outputs\//, "").split(/\/(snapshots|final_adapter)\//)[0], g = byDir.get(grpoId);
     const base = DATA.models[r.model]?.tasks[task]?.accuracy, acc = searchAcc(r, task, step);
     return g?.tasks[task] && base != null && acc != null ? [{ id, run: r, grpo: g, grpoId, step, x: 100 * (g.tasks[task].accuracy - base), y: 100 * (acc - base), task }] : [];
   });
 }
+// the u rungs the pairs actually cover; the slider clamps a window of them and both plots follow it
+const pairUs = (task) => [...new Set(pairedSearch(task, null, null, null).map((p) => p.run.proj_dim))].sort((a, b) => a - b);
+function pairURange(us) {
+  if (!us.length) return null;
+  state.pairULo = Math.min(Math.max(state.pairULo, 0), us.length - 1);
+  state.pairUHi = Math.min(Math.max(state.pairUHi, state.pairULo), us.length - 1);
+  return [us[state.pairULo], us[state.pairUHi]];
+}
+const pairSummary = (all) => `${all.length} seed-matched TinyLoRA pairs · search above GRPO in ${all.filter((p) => p.y > p.x).length} · median ${signed(median(all.map((p) => p.y - p.x)))} pt`;
 function renderPaired(task) {
   // the batch toggle picks which TuRBO variant to pair: batch 1 (one θ per vLLM call) or the batched searches
   const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => a - b);
   if (!batches.length) return "";
   if (!batches.includes(state.pairBatch)) state.pairBatch = batches[0];
   const steps = pairSteps(task), step = pairStepAt(steps);
-  const all = pairedSearch(task, state.pairBatch, step);
+  const us = pairUs(task), uwin = pairURange(us);
+  const all = pairedSearch(task, state.pairBatch, step, uwin);
   const toggle = `<div class="control"><span class="eyebrow">TuRBO batch</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
-  const above = all.filter((p) => p.y > p.x).length, med = median(all.map((p) => p.y - p.x));
   const seen = [...new Set(all.map((p) => p.run.model))], legend = seen.map((m) => `<button type="button" data-series="${esc(modelLabel(m))}" style="--c:${modelColor(m)}"><span class="swatch"></span>${esc(modelLabel(m))}<span class="mono" style="color:var(--muted)">${all.filter((p) => p.run.model === m).length}</span></button>`).join("");
   const zoom = `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="4" step="0.5" value="${state.pairZoom}" data-pair-zoom></div>`;
+  const urange = us.length > 1 ? `<div class="bo-slider"><span class="eyebrow">u range</span><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairULo}" data-pair-u-lo><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairUHi}" data-pair-u-hi><span class="mono" id="pair-u-label" style="color:var(--muted);min-width:80px">u ${uwin[0]}–${uwin[1]}</span></div>` : "";
   const stepper = steps.length ? `<div class="bo-slider"><span class="eyebrow">search step</span><input type="range" min="0" max="${steps.length}" step="1" value="${state.pairStep}" data-pair-step><span class="mono" id="pair-step-label" style="color:var(--muted);min-width:64px">${stepLabel(step)}</span></div>` : "";
-  return `<div class="panel" style="margin-top:20px"><div class="panel-head"><h2>Search vs GRPO <span class="mono" style="font-weight:400;color:var(--muted);font-size:14px">${all.length} seed-matched TinyLoRA pairs · search above GRPO in ${above} · median ${signed(med)} pt</span></h2><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div class="legend">${legend}</div>${toggle}</div></div><p style="margin:0 0 8px;color:var(--muted);font-size:13px">Each point is a BO/TuRBO search against the GRPO run whose adapter it searched from: same model, u, seed and train set. Both axes are the gain over the untrained base model in points; the dashed line is parity. The side plot tracks the same search minus GRPO gap against adapter size, one trace per model, each point the median over its seeds. Both plots follow the batch toggle. The search-step slider walks the search run back through its own evaluated snapshots; the GRPO side always stays at its final eval, which is the adapter the search started from.</p>${zoom}${stepper}<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;justify-content:center"><div class="chart-wrap" id="paired-chart" style="flex:0 1 520px;min-width:320px">${renderPairedChart(all, state.pairZoom)}</div><div class="chart-wrap" id="paired-delta" style="flex:1 1 400px;min-width:320px;max-width:460px">${renderPairedDelta(task, step)}</div></div></div>`;
+  return `<div class="panel" style="margin-top:20px"><div class="panel-head"><h2>Search vs GRPO <span class="mono" id="pair-summary" style="font-weight:400;color:var(--muted);font-size:14px">${pairSummary(all)}</span></h2><div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap"><div class="legend">${legend}</div>${toggle}</div></div><p style="margin:0 0 8px;color:var(--muted);font-size:13px">Each point is a BO/TuRBO search against the GRPO run whose adapter it searched from: same model, u, seed and train set. Both axes are the gain over the untrained base model in points; the dashed line is parity. The side plot tracks the same search minus GRPO gap against adapter size, one trace per model, each point the median over its seeds. Both plots follow the batch toggle. The search-step slider walks the search run back through its own evaluated snapshots; the GRPO side always stays at its final eval, which is the adapter the search started from. The u-range slider trims the adapter sizes in view, so a badly-searched tail can be left out.</p>${zoom}${stepper}${urange}<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;justify-content:center"><div class="chart-wrap" id="paired-chart" style="flex:0 1 520px;min-width:320px">${renderPairedChart(all, state.pairZoom)}</div><div class="chart-wrap" id="paired-delta" style="flex:1 1 400px;min-width:320px;max-width:460px">${renderPairedDelta(task, step, uwin)}</div></div></div>`;
 }
 // zoom halves the window per stop around the median pair, so the crowd near parity opens up while outliers leave the frame
 function renderPairedChart(all, zoom) {
@@ -451,11 +467,11 @@ function renderPairedChart(all, zoom) {
 }
 
 // ---- side plot: the seed-matched gap over GRPO as a function of adapter size, one trace per model at the toggled batch
-function renderPairedDelta(task, step) {
+function renderPairedDelta(task, step, us) {
   const W = 440, H = 520, M = { t: 16, r: 18, b: 48, l: 56 };
   // seeds stack up at one parameter count, so each model's trace collapses to a median per x
   const at = new Map();
-  for (const p of pairedSearch(task, state.pairBatch, step)) if (p.run.params > 0) { const k = `${p.run.model}\u0000${p.run.params}`; (at.get(k) ?? at.set(k, []).get(k)).push(p.y - p.x); }
+  for (const p of pairedSearch(task, state.pairBatch, step, us)) if (p.run.params > 0) { const k = `${p.run.model}\u0000${p.run.params}`; (at.get(k) ?? at.set(k, []).get(k)).push(p.y - p.x); }
   const cells = [...at].map(([k, ds]) => ({ model: k.split("\u0000")[0], x: +k.split("\u0000")[1], n: ds.length, med: median(ds) }));
   const series = [...new Set(cells.map((c) => c.model))].map((model) => ({ model, color: modelColor(model), band: cells.filter((c) => c.model === model).sort((u, v) => u.x - v.x) }));
   if (!cells.length) return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="no paired runs"><text class="note" x="${W / 2}" y="${H / 2}" text-anchor="middle">No paired runs</text></svg>`;
@@ -662,13 +678,20 @@ document.addEventListener("click", (e) => {
   const grp = e.target.closest("tr.grp"); if (grp) { const k = grp.dataset.key; state.expanded.has(k) ? state.expanded.delete(k) : state.expanded.add(k); return render(); }
   const pt = e.target.closest(".pt"); if (pt && pt.dataset.run) { location.hash = runHref(pt.dataset.run); return; }
 });
-document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-pair-zoom]") || e.target.matches?.("input[data-pair-step]")) {
-    const task = currentTab();
-    if (e.target.dataset.pairZoom != null) state.pairZoom = +e.target.value; else state.pairStep = +e.target.value;
-    const step = pairStepAt(pairSteps(task));
+document.addEventListener("input", (e) => { if (e.target.matches?.("input[data-pair-zoom],input[data-pair-step],input[data-pair-u-lo],input[data-pair-u-hi]")) {
+    const task = currentTab(), d = e.target.dataset, v = +e.target.value;
+    // the two u handles cannot cross: pushing one past the other drags it along
+    if (d.pairZoom != null) state.pairZoom = v;
+    else if (d.pairStep != null) state.pairStep = v;
+    else if (d.pairULo != null) { state.pairULo = v; if (state.pairUHi < v) $("input[data-pair-u-hi]").value = state.pairUHi = v; }
+    else { state.pairUHi = v; if (state.pairULo > v) $("input[data-pair-u-lo]").value = state.pairULo = v; }
+    const step = pairStepAt(pairSteps(task)), uwin = pairURange(pairUs(task));
+    const all = pairedSearch(task, state.pairBatch, step, uwin);
     if ($("#pair-step-label")) $("#pair-step-label").textContent = stepLabel(step);
-    $("#paired-chart").innerHTML = renderPairedChart(pairedSearch(task, state.pairBatch, step), state.pairZoom);
-    $("#paired-delta").innerHTML = renderPairedDelta(task, step);
+    if ($("#pair-u-label")) $("#pair-u-label").textContent = `u ${uwin[0]}–${uwin[1]}`;
+    $("#pair-summary").textContent = pairSummary(all);
+    $("#paired-chart").innerHTML = renderPairedChart(all, state.pairZoom);
+    $("#paired-delta").innerHTML = renderPairedDelta(task, step, uwin);
     return;
   } if (e.target.matches?.("input[data-bo]")) { const bo = DATA.runs[e.target.dataset.bo].bo; $(".bo-frame").innerHTML = renderBOFrame(bo, +($("input[data-bo-step]")?.value ?? (bo.gp?.frames.length ?? 1) - 1), +($("input[data-bo-zoom]")?.value ?? 0)); } });
 document.addEventListener("keydown", (e) => {
