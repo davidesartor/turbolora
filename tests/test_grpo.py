@@ -12,6 +12,7 @@ import pytest
 from types import SimpleNamespace
 import torch
 from datasets import Dataset
+from safetensors.torch import save_file
 
 
 from trl import GRPOConfig as FakeGRPOConfig, GRPOTrainer as FakeGRPOTrainer  # noqa: E402  conftest stubs
@@ -123,7 +124,7 @@ def test_run_wires_model_adapter_data_and_outputs(stubbed, tmp_path):
     assert stubbed["max_seq_length"] == 512 + 1024
     assert stubbed["max_lora_rank"] == 8
     assert stubbed["gpu_memory_utilization"] == 0.45
-    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=3)  # export happens in Snapshot at the last step
+    assert FakeAdapter.calls == dict(rank=2, seed=0, proj_dim=3, bases=None, export=str(out / "final_adapter"))
 
     # trainer gets raw-text prompts (no chat template), our reward and the resource logger
     (trainer,) = FakeGRPOTrainer.instances
@@ -175,8 +176,12 @@ def test_run_resumes_from_latest_checkpoint(stubbed, tmp_path):
     out = tmp_path / "run"
     for step in (25, 50):
         (out / f"checkpoint-{step}").mkdir(parents=True)
+        save_file({"linear.lora_A.weight": torch.zeros(2, 3)}, out / f"checkpoint-{step}" / "adapter_model.safetensors")
+    # a finish whose checkpoint cleanup died on an NFS stub leaves an empty dir; it must be pruned, not resumed from
+    (out / "checkpoint-75").mkdir()
     grpo.run(parse(out=str(out)), FakeAdapter, rank=2)
     assert FakeGRPOTrainer.instances[-1].resume_from_checkpoint == str(out / "checkpoint-50")
+    assert not (out / "checkpoint-75").exists()
 
 
 @pytest.mark.parametrize(

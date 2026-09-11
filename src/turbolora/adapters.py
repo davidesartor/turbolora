@@ -5,7 +5,7 @@ from jaxtyping import Float
 from unsloth import FastLanguageModel  # must import before peft/transformers
 
 import torch
-from einops import einsum, rearrange
+from einops import einsum
 from peft.tuners.lora import LoraLayer
 from torch import Tensor, nn
 
@@ -96,26 +96,6 @@ def pin_signs(U: Tensor, lora_B: Tensor, R: Tensor) -> Tensor:
     # Uᵀ·B·Rᵀ = D·Σ·(R·Rᵀ) has diagonal D·Σ·‖Rᵢ‖²: reads D without inverting an ill-conditioned R
     signs = torch.sign(torch.diagonal(U.T @ lora_B.to(U) @ R.to(U).T))
     return U * torch.where(signs == 0, 1.0, signs)
-
-
-def fit_tied_v(Ms: list[Tensor], Ps: list[Tensor]) -> Tensor:
-    """Tied v of a TinyLoRA export that kept no lora_v: Σ⁻¹UᵀB_m = D_m·Σᵢ vᵢP_mᵢ for sign matrices D_m.
-
-    Alternates least squares for v with the row signs D_m (the pre-2026-09-07 flips); v's global sign is unidentifiable
-    and harmless, `pin_signs` only reads D.
-    """
-    M = torch.stack([m.float().cpu() for m in Ms])
-    P = torch.stack([p.float().cpu() for p in Ps])
-    X = rearrange(P, "m u r s -> (m r s) u")
-    D = torch.ones_like(M[:, :, 0])
-    for _ in range(20):
-        y = rearrange(D[:, :, None] * M, "m r s -> (m r s)")
-        v = torch.linalg.lstsq(X, y[:, None]).solution[:, 0]
-        new = torch.sign(torch.einsum("mrs,mrs->mr", M, torch.einsum("u,murs->mrs", v, P)))
-        if torch.equal(new, D):
-            break
-        D = new
-    return v
 
 
 class LoRAXS_B(nn.Module):
@@ -238,20 +218,14 @@ class TinyLoRA(Adapter):
             for _ in range(-(-len(svds) // tie))
         ]
         Ps = [torch.randn(proj_dim, rank, rank, generator=generator) for _ in svds]
-        # an export with lora_B but no lora_v (old snapshot layout): recover each group's v from the materialized lora_B
-        if bases is not None and any(f"{name}.lora_B.weight" in bases and f"{name}.lora_v" not in bases for name, *_ in svds):
-            for g in range(len(vs)):
-                group = list(range(g * tie, min((g + 1) * tie, len(svds))))
-                Ms = [(svds[i][2].T @ bases[f"{svds[i][0]}.lora_B.weight"].to(svds[i][2])) / svds[i][3][:, None] for i in group]
-                v = fit_tied_v(Ms, [Ps[i] for i in group])
-                for i in group:
-                    bases[f"{svds[i][0]}.lora_v"] = v
         for i, (name, layer, U, S, Vh) in enumerate(svds):
             lora_a = cast(nn.Linear, layer.lora_A["default"])
             lora_a.weight.data.copy_(Vh)
             lora_a.weight.requires_grad_(False)
             P = Ps[i].to(device)
             if bases is not None and f"{name}.lora_B.weight" in bases:
+                if f"{name}.lora_v" not in bases:
+                    raise KeyError(f"bases has lora_B but no lora_v for {name}: pass the snapshot's or checkpoint's v to pin the signs")
                 R = torch.einsum("u,urs->rs", bases[f"{name}.lora_v"].to(P), P)
                 U = pin_signs(U, bases[f"{name}.lora_B.weight"], R)
             layer.lora_B["default"] = TinyLoRA_B(

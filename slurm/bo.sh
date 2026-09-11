@@ -15,13 +15,7 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
-source slurm/family.sh
-module load cuda/13.1
-export HF_HOME="$PWD/.hf-cache"
-# job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
-export UNSLOTH_COMPILE_LOCATION=/tmp/unsloth-cache
-export TRITON_CACHE_DIR=/tmp/triton
-export VLLM_CACHE_ROOT=/tmp/vllm
+source slurm/common.sh
 
 MODEL="${MODEL:?}"
 TASK="${TASK:?}"
@@ -30,17 +24,10 @@ OUT="outputs/runs/$(family "$MODEL")/${MODEL}/tinylora-turbo/${CFG:?}/seed${SEED
 # tag the job with its run dir so resume_sweep.sh can see which seeds are already queued
 scontrol update job="$SLURM_JOB_ID" comment="$OUT" || true
 
-# preemption sends TERM (900s grace), wall-limit sends USR1: python finishes the running trial and exits; trials.json resumes
-trap 'kill -USR1 "$pid"' USR1 TERM
-"$HOME/.local/bin/uv" run -m turbolora.train_turbolora \
+# on a signal python finishes the running trial and exits; trials.json resumes
+run_signalled "$HOME/.local/bin/uv" run -m turbolora.train_turbolora \
     --model "$MODEL" \
     --task "$TASK" \
     --out "$OUT" \
     --seed "$SEED" \
-    "$@" &
-pid=$!
-# `wait` returns early on a trapped signal (128+sig, which `set -e` would treat as fatal and orphan python);
-# keep waiting until python actually exits, then propagate its real exit code
-status=0
-while kill -0 "$pid" 2>/dev/null; do wait "$pid" && status=0 || status=$?; done
-exit "$status"
+    "$@"

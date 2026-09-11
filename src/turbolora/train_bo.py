@@ -18,7 +18,7 @@ from torch import Tensor
 from torch.nn.utils import vector_to_parameters
 
 from turbolora import bo, grpo
-from turbolora.adapters import Adapter, TinyLoRA
+from turbolora.adapters import Adapter
 from turbolora.models import MODELS
 from turbolora.tasks import TASKS, extract, grade
 from vllm import SamplingParams
@@ -46,7 +46,7 @@ def argument_parser() -> argparse.ArgumentParser:
         "--eval-tasks",
         nargs="+",
         choices=TASKS,
-        default=grpo.argument_parser().get_default("eval_tasks"),
+        default=grpo.EVAL_TASKS,
     )
     return parser
 
@@ -96,8 +96,8 @@ def grpo_bases(args: argparse.Namespace) -> tuple[Path, dict[str, Tensor]]:
     elif checkpoints:
         with safe_open(str(checkpoints[-1]), "pt") as f:
             bases = {k: f.get_tensor(k) for k in f.keys() if ".lora_" in k}
-    else:  # old snapshot layout kept no v: TinyLoRA.attach fits the tied v from lora_B before pinning
-        print(f"{run} has no trainable.safetensors or checkpoint; fitting v from its lora_B to pin the SVD signs")
+    else:
+        raise FileNotFoundError(f"{run} has no snapshots/*/trainable.safetensors or checkpoint to take lora_v from")
     return path, bases
 
 
@@ -109,8 +109,6 @@ def max_grpo_displacement(n_prompts: int, rank: int, proj_dim: int) -> float:
 
 def run(args: argparse.Namespace, adapter: type[Adapter], search: bo.Search, loss: str) -> None:
     """Load the base, attach `adapter`, `search` its v's, export the pick to `<out>/final_adapter`, write run.json."""
-    from vllm import SamplingParams
-
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     spec = MODELS[args.model]
@@ -178,6 +176,7 @@ def run(args: argparse.Namespace, adapter: type[Adapter], search: bo.Search, los
         bases=str(bases_path),
         batch=args.batch,
         k_rollouts=args.k_rollouts,
+        greedy=args.greedy,
         gpu=torch.cuda.get_device_name(0),
     )
     (out / "run.json").write_text(json.dumps(config, indent=1))

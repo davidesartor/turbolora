@@ -339,10 +339,9 @@ def load_bo(run_dir: Path, summary: dict) -> dict:
     if not trials:
         return {}
     rng, design = summary["theta_range"], summary["design"]
-    # bo.py rows carry no design flag: its initial design is the first `design` batches
     thetas = rnd_array([t["theta"] for t in trials])
     rows = [
-        dict(trial=t["trial"], design=bool(t.get("design", t["batch"] < design)), baseline=t["baseline"], theta=theta, value=rnd(t["value"]), sem=rnd(t["sem"], 3))
+        dict(trial=t["trial"], design=t["design"], baseline=t["baseline"], theta=theta, value=rnd(t["value"]), sem=rnd(t["sem"], 3))
         for t, theta in zip(trials, thetas)
     ]
     fitted, gp = cached_frames(trials_path)

@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Eval snapshots on one shared engine load; results land in each snapshot dir. Usage: ADAPTERS="outputs/runs/.../snapshots/step-000393 ..." [TASKS="gsm8k math500"] sbatch slurm/eval.sh
+# Eval snapshots on one shared engine load; results land in each snapshot's eval@K. Usage: ADAPTERS="outputs/runs/.../snapshots/step-000393 ..." [TASKS="gsm8k math500"] [SAMPLES=4] sbatch slurm/eval.sh
 #SBATCH -J eval
 #SBATCH -p gpu
 #SBATCH -q short
@@ -12,11 +12,6 @@
 
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
-module load cuda/13.1
-export HF_HOME="$PWD/.hf-cache"
-# job-private node-local compile caches: concurrent jobs sharing these over NFS hit ESTALE
-export UNSLOTH_COMPILE_LOCATION=/tmp/unsloth-cache
-export TRITON_CACHE_DIR=/tmp/triton
-export VLLM_CACHE_ROOT=/tmp/vllm
+source slurm/common.sh
 
-"$HOME/.local/bin/uv" run -m turbolora.eval --adapters ${ADAPTERS:?} --tasks ${TASKS:-gsm8k} ${SHOW:+--show $SHOW} --tp "${TP:-1}" --skip-existing
+"$HOME/.local/bin/uv" run -m turbolora.eval --adapters ${ADAPTERS:?} --tasks ${TASKS:-gsm8k} ${SHOW:+--show $SHOW} --tp "${TP:-1}" --samples "${SAMPLES:-1}" --skip-existing

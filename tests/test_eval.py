@@ -15,7 +15,7 @@ def test_evaluate_grades_each_prompt():
 
     def generate(prompts):
         seen.extend(prompts)
-        return ["\\boxed{2}", "\\boxed{5}", "no answer"]
+        return [["\\boxed{2}"], ["\\boxed{5}"], ["no answer"]]
 
     records = evaluate(generate, spec, DATASET)
     assert seen == [spec.prompt(q) for q in DATASET["question"]]
@@ -25,8 +25,10 @@ def test_evaluate_grades_each_prompt():
 
 
 def test_summarize():
-    records = evaluate(lambda ps: ["\\boxed{2}", "\\boxed{5}", "no answer"], MODELS["llama3.1-8b"], DATASET)
+    records = evaluate(lambda ps: [["\\boxed{2}"], ["\\boxed{5}"], ["no answer"]], MODELS["llama3.1-8b"], DATASET)
     assert summarize(records) == {"accuracy": 1 / 3, "n_correct": 1, "n": 3, "unparsed": 1}
+    sampled = evaluate(lambda ps: [["\\boxed{2}", "no"], ["\\boxed{4}", "\\boxed{5}"], ["no", "no"]], MODELS["llama3.1-8b"], DATASET)
+    assert summarize(sampled) == {"accuracy": 1 / 3, "n_correct": 2, "n": 3, "samples": 2, "pass_any": 2 / 3, "unparsed": 3}
 
 
 def test_usage_parses_nvidia_smi(monkeypatch):

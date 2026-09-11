@@ -128,11 +128,14 @@ def search(
     out: Path,
     on_snapshot: Callable[[int, dict], None] | None = None,
 ) -> dict | None:
-    """Maximize `objective` over [-θ_range, θ_range]^dim with TuRBO-1; same log, resume, signal and snapshot contract as bo.search.
+    """Maximize `objective` over [-θ_range, θ_range]^dim with TuRBO-1, logging to `<out>/trials.json`; returns the evaluated trial with the best GP posterior mean.
 
     The region's GP (unit-cube inputs, lengthscale prior scaled by the side) sees the θ=0 replicates plus every trial since the
     region started; success/failure and the center use its posterior mean. When the side drops below `tr_min` the region restarts
     from a fresh Sobol design of `n_sobol` points. Snapshots and the final pick use bo.pick over all trials.
+
+    Each trial's sem² is its observation noise. Resumes from the log (and turbo.json); a SIGUSR1/SIGTERM finishes the running
+    batch and returns None. `on_snapshot(step, pick)` fires after GP-guided batch 1, 2, 4, ... and the last with the current pick.
     """
     trials_path = out / "trials.json"
     state_path = out / "turbo.json"
@@ -153,7 +156,7 @@ def search(
     to_unit = lambda theta: (theta - bounds[0]) / (bounds[1] - bounds[0])  # noqa: E731
 
     def region_design(state: TurboState) -> list[Float[Tensor, "B D"]]:
-        """The first region starts like bo.search (θ=0 replicates, then Sobol); a restart gets its own Sobol design."""
+        """The first region starts with the θ=0 replicates, then Sobol; a restart gets its own Sobol design."""
         sobol = to_theta(
             SobolEngine(dim, scramble=True, seed=args.seed + 1000 * state.restarts)
             .draw(args.n_sobol)

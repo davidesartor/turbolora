@@ -208,7 +208,7 @@ const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Mat
 const color = (i) => PALETTE[i % PALETTE.length];
 
 // ---- state: view + x axis persist per viewer, tab lives in the hash, hidden/expanded last the session
-const state = { view: "dataset", x: "params", train: "all", obj: "greedy", runs: "all", pairBatch: 1, pairZoom: 0, pairStep: 99, pairULo: 0, pairUHi: 99, hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
+const state = { view: "dataset", x: "params", train: "all", obj: "greedy", runs: "all", pairBatch: "1", pairZoom: 0, pairStep: 99, pairULo: 0, pairUHi: 99, hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("turbolora-curves") ?? "{}"), { hidden: new Set(), hiddenAdapters: new Set(), expanded: new Set() }); } catch {}
 const persist = () => { try { localStorage.setItem("turbolora-curves", JSON.stringify({ view: state.view, x: state.x, train: state.train, obj: state.obj, runs: state.runs, pairBatch: state.pairBatch })); } catch {} };
 // models with no training runs start hidden in the chart; the legend brings them back
@@ -254,7 +254,7 @@ function renderControls() {
 $("#view").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.view = b.dataset.v; persist(); location.hash = ""; render(); });
 $("#train").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.train = b.dataset.t; persist(); render(); });
 $("#obj").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.obj = b.dataset.o; persist(); render(); });
-document.addEventListener("click", (e) => { const b = e.target.closest("#pair-batch button"); if (!b) return; state.pairBatch = +b.dataset.b; persist(); render(); });
+document.addEventListener("click", (e) => { const b = e.target.closest("#pair-batch button"); if (!b) return; state.pairBatch = b.dataset.b; persist(); render(); });
 $("#xaxis").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.x = b.dataset.x; persist(); render(); });
 $("#runs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.runs = b.dataset.r; persist(); render(); });
 window.addEventListener("hashchange", render);
@@ -395,7 +395,7 @@ function renderTable(series) {
 
 // ---- seed-matched search vs GRPO: a BO/TuRBO run's `bases` names the GRPO export it searched from, so the pair shares model, u, seed and train set
 const stepLabel = (step) => step == null ? "final" : `step ${step}`;
-const batchOf = (r) => r.batch ?? 1;
+const batchOf = (r) => `${r.batch ?? 1}${r.greedy === false ? " · T=1" : ""}`;
 const evalStepsOf = (r, task) => (r.curves ?? []).filter((c) => c[evalPrefix() + task] != null).map((c) => c.step).sort((a, b) => a - b);
 const searchAcc = (r, task, step) => step == null ? r.tasks[task]?.accuracy : (r.curves ?? []).find((c) => c.step === step)?.[evalPrefix() + task];
 // the search snapshots ride a dyadic ladder (1, 2, 4 ... 256) shared across runs; the rung past its end is each run's own final eval
@@ -429,13 +429,13 @@ function pairURange(us) {
 const pairSummary = (all) => `${all.length} seed-matched TinyLoRA pairs · search above GRPO in ${all.filter((p) => p.y > p.x).length} · median ${signed(median(all.map((p) => p.y - p.x)))} pt`;
 function renderPaired(task) {
   // the batch toggle picks which TuRBO variant to pair: batch 1 (one θ per vLLM call) or the batched searches
-  const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => a - b);
+  const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => parseInt(a) - parseInt(b) || a.localeCompare(b));
   if (!batches.length) return "";
   if (!batches.includes(state.pairBatch)) state.pairBatch = batches[0];
   const steps = pairSteps(task), step = pairStepAt(steps);
   const us = pairUs(task), uwin = pairURange(us);
   const all = pairedSearch(task, state.pairBatch, step, uwin);
-  const toggle = `<div class="control"><span class="eyebrow">TuRBO batch</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
+  const toggle = `<div class="control"><span class="eyebrow">TuRBO batch · objective</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
   const seen = [...new Set(all.map((p) => p.run.model))], legend = seen.map((m) => `<button type="button" data-series="${esc(modelLabel(m))}" style="--c:${modelColor(m)}"><span class="swatch"></span>${esc(modelLabel(m))}<span class="mono" style="color:var(--muted)">${all.filter((p) => p.run.model === m).length}</span></button>`).join("");
   const zoom = `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="4" step="0.5" value="${state.pairZoom}" data-pair-zoom></div>`;
   const urange = us.length > 1 ? `<div class="bo-slider"><span class="eyebrow">u range</span><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairULo}" data-pair-u-lo><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairUHi}" data-pair-u-hi><span class="mono" id="pair-u-label" style="color:var(--muted);min-width:80px">u ${uwin[0]}–${uwin[1]}</span></div>` : "";
@@ -461,7 +461,7 @@ function renderPairedChart(all, zoom) {
   if (lo < 0 && hi > 0) g += `<line class="axis" style="stroke:var(--line)" x1="${sx(0)}" x2="${sx(0)}" y1="${M.t}" y2="${H - M.b}"/><line style="stroke:var(--line)" x1="${M.l}" x2="${W - M.r}" y1="${sy(0)}" y2="${sy(0)}"/>`;
   // one pair per GRPO seed: the same GRPO run can anchor several searches (BO, TuRBO, batched), joined by a faint vertical stem
   for (const [grpoId, group] of Map.groupBy(pts, (p) => p.grpoId)) if (group.length > 1) g += `<line class="base" style="stroke:${modelColor(group[0].run.model)};opacity:0.35" x1="${sx(group[0].x)}" x2="${sx(group[0].x)}" y1="${sy(Math.min(...group.map((p) => p.y)))}" y2="${sy(Math.max(...group.map((p) => p.y)))}"/>`;
-  g += pts.map((p) => { const d = p.y - p.x, tip = `<b>${esc(p.id.split("/").slice(-2).join("/"))}</b><small>${esc(modelLabel(p.run.model))} · u=${p.run.proj_dim} · seed ${p.run.seed} · ${ADAPTER[p.run.adapter] ?? p.run.adapter}${p.run.batch ? ` (batch ${p.run.batch})` : ""} · ${stepLabel(p.step)}<br>search ${signed(p.y)} vs GRPO ${signed(p.x)} pt over base · ${signed(d)}</small>`; return `${mark(p.run.adapter, sx(p.x), sy(p.y))} class="pt" tabindex="0" style="fill:${modelColor(p.run.model)}" data-run="${esc(p.id)}" data-tip="${esc(tip)}"/>`; }).join("");
+  g += pts.map((p) => { const d = p.y - p.x, tip = `<b>${esc(p.id.split("/").slice(-2).join("/"))}</b><small>${esc(modelLabel(p.run.model))} · u=${p.run.proj_dim} · seed ${p.run.seed} · ${ADAPTER[p.run.adapter] ?? p.run.adapter}${p.run.batch ? ` (batch ${batchOf(p.run)})` : ""} · ${stepLabel(p.step)}<br>search ${signed(p.y)} vs GRPO ${signed(p.x)} pt over base · ${signed(d)}</small>`; return `${mark(p.run.adapter, sx(p.x), sy(p.y))} class="pt" tabindex="0" style="fill:${modelColor(p.run.model)}" data-run="${esc(p.id)}" data-tip="${esc(tip)}"/>`; }).join("");
   if (pts.length < all.length) g += `<text class="note" x="${W - M.r - 4}" y="${M.t + 14}" text-anchor="end">${all.length - pts.length} outside window</text>`;
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="search gain versus GRPO gain">${g}</svg><div class="tip" hidden></div>`;
 }
@@ -643,7 +643,7 @@ function renderRun(id) {
       ${r.bo ? renderBOSection({ ...r, id }) : ""}
       ${multiples || (r.bo ? "" : `<div class="placeholder">No training curves yet.</div>`)}
     </div>
-    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>sbatch slurm/${state.obj === "greedy" ? "eval_sweep.sh" : "eval_sampled_sweep.sh"}</code></div>`}`;
+    ${evals ? `<div class="scroll"><table><thead><tr><th>Eval</th><th>Accuracy</th><th>Base</th><th>Δ base</th><th>Wrong</th></tr></thead><tbody>${evals}</tbody></table></div>` : `<div class="placeholder">${r.status === "running" ? "Still training; the last snapshot is evaluated in-run — " : "Not evaluated yet — "}<code>${state.obj === "greedy" ? "" : "SAMPLES=4 "}ADAPTERS=&lt;snapshot&gt; sbatch slurm/eval.sh</code></div>`}`;
 }
 
 // ---- tooltip + drawer

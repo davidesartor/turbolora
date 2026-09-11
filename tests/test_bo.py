@@ -1,4 +1,4 @@
-"""CPU tests: the GP and `bo.search` on a toy objective; `train_bo.run` with unsloth (conftest), vLLM and CUDA faked."""
+"""CPU tests: the GP and `turbo.search` on a toy objective; `train_bo.run` with unsloth (conftest), vLLM and CUDA faked."""
 
 import importlib.machinery
 import json
@@ -26,11 +26,15 @@ vllm.SamplingParams = FakeSamplingParams  # type: ignore[attr-defined]
 sys.modules["vllm"] = vllm
 
 import unsloth  # noqa: E402  conftest stub
-from turbolora import bo, train_bo  # noqa: E402
+from turbolora import bo, train_bo, turbo  # noqa: E402
 from turbolora.adapters import TinyLoRA  # noqa: E402
 from turbolora.models import MODELS  # noqa: E402
 
-SMALL = ["--theta-range", "0.1", "--batch", "1", "--n-baseline", "2", "--n-sobol", "2", "--n-evals", "4", "--thompson-candidates", "50"]
+SMALL = ["--theta-range", "0.1", "--batch", "1", "--n-baseline", "2", "--n-sobol", "2", "--n-evals", "4"]
+
+
+def search_args(*extra: str):
+    return turbo.add_arguments(bo.argument_parser()).parse_args([*SMALL, *extra])
 
 
 def test_fixed_noise_gp_denoises_toward_the_optimum():
@@ -60,7 +64,8 @@ def test_fit_gp_reads_trials():
 def test_search_defaults():
     args = bo.argument_parser().parse_args([])
     assert (args.seed, args.theta_range) == (0, None)
-    assert (args.n_baseline, args.n_sobol, args.n_evals, args.thompson_candidates) == (8, 8, None, 2048)
+    assert (args.n_baseline, args.n_sobol, args.n_evals) == (8, 8, None)
+    assert (search_args().tr_init, search_args().succ_tol, search_args().fail_tol) == (0.8, 3, None)
 
 
 def quadratic(thetas, batch):
@@ -68,14 +73,15 @@ def quadratic(thetas, batch):
     return [(1.0 - 100 * ((theta - torch.tensor([0.05, -0.05])) ** 2).sum().item(), 0.01) for theta in thetas]
 
 
-def test_search_baseline_sobol_thompson_then_best_posterior(tmp_path):
+def test_search_baseline_sobol_region_then_best_posterior(tmp_path):
     seen = []
-    args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
-    chosen = bo.search(args, lambda t, b: seen.extend((row, b) for row in t.tolist()) or quadratic(t, b), dim=2, out=tmp_path)
+    chosen = turbo.search(search_args("--n-evals", "8"), lambda t, b: seen.extend((row, b) for row in t.tolist()) or quadratic(t, b), dim=2, out=tmp_path)
 
     trials = json.loads((tmp_path / "trials.json").read_text())
     assert [(t["theta"], t["trial"]) for t in trials] == seen
     assert [t["baseline"] for t in trials] == [True] * 2 + [False] * 10
+    assert [t["design"] for t in trials] == [True] * 4 + [False] * 8
+    assert (tmp_path / "turbo.json").exists()
     assert all(t["theta"] == [0.0, 0.0] for t in trials[:2])
     assert all(-0.1 <= x <= 0.1 for t in trials[2:] for x in t["theta"])
     assert trials[2]["theta"] != trials[3]["theta"]
@@ -88,21 +94,20 @@ def test_search_baseline_sobol_thompson_then_best_posterior(tmp_path):
 
 def test_search_can_return_theta_zero(tmp_path):
     # every searched point scores below the θ=0 replicates: the honest pick is no adapter at all
-    args = bo.argument_parser().parse_args([*SMALL, "--n-evals", "8"])
     objective = lambda thetas, batch: [(1.0 - 10 * theta.abs().sum().item(), 0.02) for theta in thetas]
-    chosen = bo.search(args, objective, 2, tmp_path)
+    chosen = turbo.search(search_args("--n-evals", "8"), objective, 2, tmp_path)
     assert chosen is not None and chosen["theta"] == [0.0, 0.0] and chosen["baseline"]
 
 
 def test_search_resumes_from_trials_json(tmp_path):
     done = [
-        dict(trial=0, baseline=True, theta=[0.0, 0.0], value=0.5, sem=0.02),
-        dict(trial=1, baseline=True, theta=[0.0, 0.0], value=0.6, sem=0.02),
-        dict(trial=2, baseline=False, theta=[0.07, -0.01], value=0.7, sem=0.02),
+        dict(trial=0, batch=0, design=True, baseline=True, theta=[0.0, 0.0], value=0.5, sem=0.02, length=0.8),
+        dict(trial=1, batch=1, design=True, baseline=True, theta=[0.0, 0.0], value=0.6, sem=0.02, length=0.8),
+        dict(trial=2, batch=2, design=True, baseline=False, theta=[0.07, -0.01], value=0.7, sem=0.02, length=0.8),
     ]
     (tmp_path / "trials.json").write_text(json.dumps(done))
     seen = []
-    bo.search(bo.argument_parser().parse_args(SMALL), lambda t, i: seen.append(i) or quadratic(t, i), 2, tmp_path)
+    turbo.search(search_args(), lambda t, i: seen.append(i) or quadratic(t, i), 2, tmp_path)
     trials = json.loads((tmp_path / "trials.json").read_text())
     assert trials[:3] == done and len(trials) == 8
     assert seen == [3, 4, 5, 6, 7]
@@ -114,7 +119,7 @@ def test_search_stops_after_current_trial_on_signal(tmp_path):
             os.kill(os.getpid(), signal.SIGUSR1)
         return quadratic(thetas, batch)
 
-    assert bo.search(bo.argument_parser().parse_args(SMALL), objective, 2, tmp_path) is None
+    assert turbo.search(search_args(), objective, 2, tmp_path) is None
     assert len(json.loads((tmp_path / "trials.json").read_text())) == 2
 
 
@@ -195,7 +200,7 @@ def stubbed(monkeypatch, tmp_path):
 
 def parse(*extra: str, out: str):
     base = ["--model", "qwen2.5-7b", "--task", "gsm8k", "--out", out, "--no-greedy", "--k-rollouts", "64", "--eval-tasks", "gsm8k"]
-    return train_bo.argument_parser().parse_args([*base, *SMALL, *extra])
+    return turbo.add_arguments(train_bo.argument_parser()).parse_args([*base, *SMALL, *extra])
 
 
 def test_argument_parser_defaults():
@@ -227,8 +232,8 @@ def test_run_resolves_theta_range_and_n_evals_from_dataset(stubbed, tmp_path):
     args = parse(out=str(tmp_path / "run"))
     args.theta_range = None
     args.n_evals = None
-    train_bo.run(args, FakeAdapter, bo.search, "turbo")
-    # 4 prompts -> 1 step/epoch -> 3 · 5e-4; 3·4·4 = 48 completions / (3 questions · 2 rollouts) = 8 trials
+    train_bo.run(args, FakeAdapter, turbo.search, "turbo")
+    # 4 prompts -> 1 step/epoch -> 3 · 5e-4
     assert args.theta_range == pytest.approx(1.5e-3)
     assert args.n_evals == train_bo.grpo_steps(len(DATASET))
     assert json.loads((tmp_path / "run" / "run.json").read_text())["theta_range"] == pytest.approx(1.5e-3)
@@ -237,7 +242,7 @@ def test_run_resolves_theta_range_and_n_evals_from_dataset(stubbed, tmp_path):
 def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     model, loads = stubbed
     out = tmp_path / "run"
-    train_bo.run(parse(out=str(out)), FakeAdapter, bo.search, "turbo")
+    train_bo.run(parse(out=str(out)), FakeAdapter, turbo.search, "turbo")
     spec = MODELS["qwen2.5-7b"]
 
     # same load as grpo.run, adapter attached with its kwargs
@@ -250,16 +255,16 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     # each trial's θ lands in the model (as float32) before generation; one fresh vLLM adapter id per generation, no export
     trials = json.loads((out / "trials.json").read_text())
     assert len(trials) == 8
-    rollouts = [c for c in model.calls if c["sampling"].n == 2]
+    rollouts = [c for c in model.calls if c["sampling"].n == 64]
     assert all(len(set(c["lora_ids"])) == 1 for c in rollouts)  # batch 1: one LoRA serves every prompt of the call
     assert torch.allclose(torch.tensor([model.loras[c["lora_ids"][0]] for c in rollouts]), torch.tensor([t["theta"] for t in trials]))
     assert model.v.dtype == torch.float32
     ids = [c["lora_ids"][0] for c in model.calls]
-    assert ids == sorted(ids) and len(set(ids)) == len(ids)
+    assert ids == sorted(ids) and len({c["lora_ids"][0] for c in rollouts}) == len(rollouts)
     assert all(t["sem"] > 0 for t in trials)  # Beta posterior noise, no floor needed
 
     # objective: n questions x K rollouts, raw-text prompts with the model's stop strings
-    assert all(len(c["prompts"]) == 3 for c in rollouts)
+    assert all(len(c["prompts"]) == 256 // 64 for c in rollouts)  # one GRPO step of completions per call
     assert rollouts[0]["sampling"].stop == list(spec.prompt.stop)
     assert all(p.startswith("<|im_start|>system") for p in rollouts[0]["prompts"])
 
@@ -271,9 +276,10 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert 1 <= len(evals) <= 3  # an unchanged pick copies the previous snapshot instead of re-evaluating
     for name in snapshots:
         assert (out / "snapshots" / name / "trainable.safetensors").exists()
-        assert json.loads((out / "snapshots" / name / "eval.json").read_text())["gsm8k"]["n"] == len(DATASET)
-    assert (out / "snapshots" / "step-000004" / "adapter_config.json").exists()
-    assert [e["dir"] for e in FakeAdapter.exports] == [str(out / "snapshots" / "step-000004"), str(out / "final_adapter")]
+        assert json.loads((out / "snapshots" / name / "eval@1" / "summary.json").read_text())["gsm8k"]["n"] == len(DATASET)
+    assert json.loads((out / "snapshots" / "step-000004" / "eval@4" / "summary.json").read_text())["gsm8k"]["samples"] == 4
+    # every snapshot refreshes the final_adapter export; the run's own export of the chosen θ comes last
+    assert {e["dir"] for e in FakeAdapter.exports} == {str(out / "final_adapter")} and len(FakeAdapter.exports) == len(evals) + 1
 
     # export: final_adapter written from the chosen θ, run.json for the dashboard
     summary = json.loads((out / "run.json").read_text())
@@ -284,13 +290,16 @@ def test_run_wires_model_adapter_objective_and_outputs(stubbed, tmp_path):
     assert (summary["adapter"], summary["loss"], summary["steps"], summary["params"], summary["gpu"]) == ("fakeadapter", "turbo", 8, 2, "FakeGPU")
     assert {"baseline", "baseline_logit", "baseline_logit_sem"} <= summary.keys() and 0 < summary["baseline"] < 1
     assert (summary["rank"], summary["proj_dim"], summary["tie"], summary["peak_vram_gb"]) == (2, 1, 0, 3.0)
+    # --no-greedy: GRPO's rollout sampler (T=1, no top-p/k) and run.json says so
+    assert summary["greedy"] is False and summary["k_rollouts"] == 64
+    assert all(c["sampling"].temperature == 1.0 for c in rollouts)
 
 
 def test_run_untied_concatenates_every_v(stubbed, tmp_path):
     model, _ = stubbed
     model.linear.weight.requires_grad_(True)  # a second trainable tensor: θ ∈ ℝ^(2+15)
     FakeAdapter.attach = staticmethod(lambda m, rank, seed, **kw: (FakeAdapter.calls.update(kw), m)[1])
-    train_bo.run(parse("--untie", out=str(tmp_path / "run")), FakeAdapter, bo.search, "turbo")
+    train_bo.run(parse("--untie", out=str(tmp_path / "run")), FakeAdapter, turbo.search, "turbo")
     summary = json.loads((tmp_path / "run" / "run.json").read_text())
     assert FakeAdapter.calls["tie"] == 1 and summary["tie"] == 1
     assert summary["params"] == 17 and len(summary["theta"]) == 17
@@ -299,8 +308,8 @@ def test_run_untied_concatenates_every_v(stubbed, tmp_path):
 
 def test_run_skips_export_when_search_is_interrupted(stubbed, tmp_path, monkeypatch):
     out = tmp_path / "run"
-    monkeypatch.setattr(bo, "search", lambda *a, **k: None)
-    train_bo.run(parse(out=str(out)), FakeAdapter, bo.search, "turbo")
+    monkeypatch.setattr(turbo, "search", lambda *a, **k: None)
+    train_bo.run(parse(out=str(out)), FakeAdapter, turbo.search, "turbo")
     # the config half of run.json is out for the dashboard, the summary half is not
     config = json.loads((out / "run.json").read_text())
     assert "steps" not in config and config["max_steps"] == 4 and config["design"] == 4

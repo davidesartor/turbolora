@@ -1,4 +1,4 @@
-"""TuRBO training of TinyLoRA: train_bo's objective, searched by turbo.search instead of global Thompson sampling."""
+"""TuRBO training of TinyLoRA: train_bo's objective searched by turbo.search."""
 
 from turbolora import train_bo, turbo
 from turbolora.adapters import TinyLoRA

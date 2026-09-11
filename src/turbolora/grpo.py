@@ -27,6 +27,7 @@ R_STEP_NORM = 1e-3
 PROMPTS_PER_STEP = 64
 ROLLOUTS_PER_PROMPT = 4
 MAX_PROMPT_LENGTH = 512  # 75 of 8521 hard prompts exceed it and are dropped
+EVAL_TASKS = ["gsm8k", "math500", "aime24", "amc23", "minerva", "olympiad"]
 
 
 def patch_config_pad_token(hf_id: str, pad_token_id: int):
@@ -218,7 +219,7 @@ def argument_parser() -> argparse.ArgumentParser:
         "--eval-tasks",
         nargs="+",
         choices=TASKS,
-        default=["gsm8k", "math500", "aime24", "amc23", "minerva", "olympiad"],
+        default=EVAL_TASKS,
     )
     return parser
 
@@ -240,6 +241,10 @@ def run(
     # restart (and BO) reuses its lora_A as the SVD bases, since solvers on different cards can flip singular-pair signs.
     # A resume also passes the checkpoint's lora_B and lora_v, which pin U's signs to the ones the run actually trained with.
     final_adapter = Path(args.out) / "final_adapter"
+    # a finish that could not delete its last checkpoint (NFS .nfs* stub) leaves an empty checkpoint-N: never resume from it
+    for husk in Path(args.out).glob("checkpoint-*"):
+        if not (husk / "adapter_model.safetensors").is_file():
+            shutil.rmtree(husk, ignore_errors=True)
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     bases_export = final_adapter / "adapter_model.safetensors"
     bases = None
@@ -337,11 +342,7 @@ def run(
     os.chdir(args.out)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    # the last snapshot holds the final adapter; the resume checkpoints have nothing else
-    for checkpoint in Path(args.out).glob("checkpoint-*"):
-        shutil.rmtree(checkpoint)
-
-    # resource summary the dashboard plots accuracy against
+    # resource summary the dashboard plots accuracy against; stamped before any cleanup so a cleanup error can't hide a finished run
     peak_vram_gb = torch.cuda.max_memory_allocated() / 2**30
     summary |= dict(
         steps=trainer.state.global_step,
@@ -349,6 +350,11 @@ def run(
         peak_vram_gb=round(peak_vram_gb, 2),
     )
     (Path(args.out) / "run.json").write_text(json.dumps(summary, indent=1))
+
+    # the last snapshot holds the final adapter; the resume checkpoints have nothing else. Best effort: a file still
+    # open in-process becomes an NFS .nfs* stub that only vanishes at exit, and the next start prunes the empty dir
+    for checkpoint in Path(args.out).glob("checkpoint-*"):
+        shutil.rmtree(checkpoint, ignore_errors=True)
     print(
         f"peak VRAM: {peak_vram_gb:.1f} GiB, {summary['params']} trainable params"
     )
