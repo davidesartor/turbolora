@@ -15,7 +15,7 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.quasirandom import SobolEngine
 
-from turbolora.bo import Objective, fit_gp, pick
+from turbolora.bo import Objective, fit_gp
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -132,7 +132,8 @@ def search(
 
     The region's GP (unit-cube inputs, lengthscale prior scaled by the side) sees the θ=0 replicates plus every trial since the
     region started; success/failure and the center use its posterior mean. When the side drops below `tr_min` the region restarts
-    from a fresh Sobol design of `n_sobol` points. Snapshots and the final pick use bo.pick over all trials.
+    from a fresh Sobol design of `n_sobol` points. Snapshots and the final pick take the highest posterior mean under the same
+    region-scaled GP fit over every trial (bo.pick's global prior, ~4√D lengthscales in the unit box, goes flat at large u).
 
     Each trial's sem² is its observation noise. Resumes from the log (and turbo.json); a SIGUSR1/SIGTERM finishes the running
     batch and returns None. `on_snapshot(step, pick)` fires after GP-guided batch 1, 2, 4, ... and the last with the current pick.
@@ -185,6 +186,20 @@ def search(
         if state_path.exists()
         else new_state()
     )
+
+    def region_pick(state: TurboState) -> tuple[dict, float]:
+        """The evaluated trial with the highest posterior mean under the region-scaled GP over all trials."""
+        if len({tuple(t["theta"]) for t in trials}) < 2:
+            return trials[0], trials[0]["value"]
+        X = to_unit(torch.tensor([t["theta"] for t in trials], dtype=torch.float64))
+        gp = fit_gp(
+            [dict(t, theta=x.tolist()) for t, x in zip(trials, X)],
+            unit_bounds,
+            state.length,
+        )
+        with torch.no_grad():
+            means = gp.posterior(X).mean.squeeze(-1)
+        return trials[int(means.argmax())], means.max().item()
 
     stop = argparse.Namespace(requested=False)
     for sig in (signal.SIGUSR1, signal.SIGTERM):
@@ -252,12 +267,12 @@ def search(
             and not is_design
             and (not step & (step - 1) or step == args.n_evals)
         ):
-            on_snapshot(step, pick(trials)[0])
+            on_snapshot(step, region_pick(state)[0])
     if stop.requested:
         print("stopped on signal; rerun to resume")
         return None
 
-    chosen, posterior_mean = pick(trials)
+    chosen, posterior_mean = region_pick(state)
     baseline = torch.tensor([t["value"] for t in trials if t["baseline"]])
     baseline_sem = baseline.std(unbiased=len(baseline) > 1) / len(baseline) ** 0.5
     print(
