@@ -148,6 +148,7 @@ def main() -> None:
         help="snapshot dirs (<run>/snapshots/step-N); each one's results go into that dir",
     )
     parser.add_argument("--tasks", nargs="+", choices=TASKS, required=True)
+    parser.add_argument("--split", default="test", help="dataset split; a non-test split writes <task>-<split>.json.gz (train-set eval of a run's own tier)")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
         "--samples", type=int, default=1, help="completions per question; >1 samples at --temperature; results go under eval@K"
@@ -205,7 +206,8 @@ def main() -> None:
         max_tokens=max_tokens,
         stop=list(spec.prompt.stop),
     )
-    datasets = {task: TASKS[task]("test") for task in args.tasks}
+    # results of a non-test split get their own name so they never shadow the test eval (the tiers' `test` is MATH-500)
+    datasets = {task if args.split == "test" else f"{task}-{args.split}": TASKS[task](args.split) for task in args.tasks}
 
     for index, (adapter, (_, out_dir)) in enumerate(zip(adapters, runs)):
         lora_request = (
@@ -218,14 +220,14 @@ def main() -> None:
             for o in llm.generate(prompts, sampling, lora_request=lora_request)
         ]
 
-        for task in args.tasks:
+        for task, dataset in datasets.items():
             out_path = eval_dir(out_dir, args.samples) / f"{task}.json.gz"
             if args.skip_existing and out_path.exists():
                 print(f"skipping {out_path}")
                 continue
 
             start = time.perf_counter()
-            records = evaluate(generate, spec, datasets[task])
+            records = evaluate(generate, spec, dataset)
             stats = summarize(records) | usage(time.perf_counter() - start)
 
             for record in records[: args.show]:
@@ -240,7 +242,7 @@ def main() -> None:
             )
 
             write_result(
-                out_dir, task, stats, records, args.samples, model=spec.hf_id, adapter=adapter, temperature=sampling.temperature
+                out_dir, task, stats, records, args.samples, model=spec.hf_id, adapter=adapter, temperature=sampling.temperature, split=args.split, max_tokens=max_tokens
             )
             print(f"wrote {out_path}")
 

@@ -114,6 +114,8 @@ MODEL=qwen2.5-7b TASK=easy CFG=r2-u1-b1-t1 sbatch slurm/bo.sh --proj-dim 1 --bat
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
 ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
 SAMPLES=4 ADAPTERS=... sbatch slurm/eval.sh   # sampled eval@4 (T=1) instead of greedy eval@1
+TASKS=hard SPLIT=train MAX_TOKENS=1024 ADAPTERS=... sbatch slurm/eval.sh   # greedy on the run's own train tier at the training budget -> eval@1/hard-train.json.gz
+python3 tmp/tools/launch_train_eval.py   # GO=1: submit that for every finished tinylora run's last snapshot, batched per model on gpu-preempt
 
 # resubmit every run whose run.json lacks `steps`, skipping seeds already queued
 GO=1 slurm/resume_sweep.sh
