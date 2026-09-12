@@ -201,9 +201,13 @@ const runs = Object.entries(DATA.runs ?? {});
 // `tasks` follows the eval-objective toggle: the accuracies of whichever objective is selected
 const objectives = DATA.objectives ?? { greedy: { suffix: "", label: "Greedy" } };
 for (const r of [...Object.values(DATA.models), ...Object.values(DATA.runs ?? {})]) Object.defineProperty(r, "tasks", { get: () => r.evals?.[state.obj] ?? {} });
+// the trial log ships columnar; a run page expands its rows once, on first use
+for (const r of Object.values(DATA.runs ?? {})) if (r.bo) { const c = r.bo.trials, design = new Set(c.design), baseline = new Set(c.baseline); let rows; Object.defineProperty(r.bo, "trials", { get: () => rows ??= c.value.map((value, trial) => ({ trial, value, sem: c.sem[trial], theta: c.theta[trial], dim: c.dim, design: design.has(trial), baseline: baseline.has(trial) })) }); }
 const evalPrefix = () => `${objectives[state.obj].key}_`;
 const trainSets = ["easy", "medium", "hard"];
-const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter) && (state.runs === "all" || r.status !== "running");
+// a search run only shows under the eval objective it was trained on: `greedy: false` runs searched the T=1 sampler
+const objOk = (r) => !r.bases || (r.greedy !== false) === (state.obj === "greedy");
+const trainOk = (r) => (state.train === "all" || r.task === state.train) && !state.hiddenAdapters.has(r.adapter) && (state.runs === "all" || r.status !== "running") && objOk(r);
 const shade = (c, j, n) => n > 1 ? `color-mix(in srgb, ${c}, var(--ground) ${Math.round(55 * j / (n - 1))}%)` : c;
 const color = (i) => PALETTE[i % PALETTE.length];
 
@@ -395,7 +399,7 @@ function renderTable(series) {
 
 // ---- seed-matched search vs GRPO: a BO/TuRBO run's `bases` names the GRPO export it searched from, so the pair shares model, u, seed and train set
 const stepLabel = (step) => step == null ? "final" : `step ${step}`;
-const batchOf = (r) => `${r.batch ?? 1}${r.greedy === false ? " · T=1" : ""}`;
+const batchOf = (r) => `${r.batch ?? 1}`;
 const evalStepsOf = (r, task) => (r.curves ?? []).filter((c) => c[evalPrefix() + task] != null).map((c) => c.step).sort((a, b) => a - b);
 const searchAcc = (r, task, step) => step == null ? r.tasks[task]?.accuracy : (r.curves ?? []).find((c) => c.step === step)?.[evalPrefix() + task];
 // the search snapshots ride a dyadic ladder (1, 2, 4 ... 256) shared across runs; the rung past its end is each run's own final eval
@@ -429,13 +433,13 @@ function pairURange(us) {
 const pairSummary = (all) => `${all.length} seed-matched TinyLoRA pairs · search above GRPO in ${all.filter((p) => p.y > p.x).length} · median ${signed(median(all.map((p) => p.y - p.x)))} pt`;
 function renderPaired(task) {
   // the batch toggle picks which TuRBO variant to pair: batch 1 (one θ per vLLM call) or the batched searches
-  const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => parseInt(a) - parseInt(b) || a.localeCompare(b));
+  const batches = [...new Set(pairedSearch(task).map((p) => batchOf(p.run)))].sort((a, b) => a - b);
   if (!batches.length) return "";
   if (!batches.includes(state.pairBatch)) state.pairBatch = batches[0];
   const steps = pairSteps(task), step = pairStepAt(steps);
   const us = pairUs(task), uwin = pairURange(us);
   const all = pairedSearch(task, state.pairBatch, step, uwin);
-  const toggle = `<div class="control"><span class="eyebrow">TuRBO batch · objective</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
+  const toggle = `<div class="control"><span class="eyebrow">TuRBO batch</span><div class="toggle" id="pair-batch">${batches.map((b) => `<button type="button" data-b="${b}" class="${b === state.pairBatch ? "on" : ""}">${b}</button>`).join("")}</div></div>`;
   const seen = [...new Set(all.map((p) => p.run.model))], legend = seen.map((m) => `<button type="button" data-series="${esc(modelLabel(m))}" style="--c:${modelColor(m)}"><span class="swatch"></span>${esc(modelLabel(m))}<span class="mono" style="color:var(--muted)">${all.filter((p) => p.run.model === m).length}</span></button>`).join("");
   const zoom = `<div class="bo-slider"><span class="eyebrow">zoom</span><input type="range" min="0" max="4" step="0.5" value="${state.pairZoom}" data-pair-zoom></div>`;
   const urange = us.length > 1 ? `<div class="bo-slider"><span class="eyebrow">u range</span><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairULo}" data-pair-u-lo><input type="range" min="0" max="${us.length - 1}" step="1" value="${state.pairUHi}" data-pair-u-hi><span class="mono" id="pair-u-label" style="color:var(--muted);min-width:80px">u ${uwin[0]}–${uwin[1]}</span></div>` : "";

@@ -226,8 +226,8 @@ def slim(entry: dict, every: int) -> dict:
     """Shrink a run or baseline in place to what the charts draw: curves every Nth step, no misses, θ₀ per trial (the 1-D plot)."""
     if "curves" in entry:
         entry["curves"] = thin(entry["curves"], every)
-    for t in entry.get("bo", {}).get("trials", []):
-        t["dim"], t["theta"] = len(t["theta"]), t["theta"][:1]
+    if "bo" in entry:
+        entry["bo"]["trials"]["theta"] = [theta[:1] for theta in entry["bo"]["trials"]["theta"]]
     for stats in (s for per_task in entry["evals"].values() for s in per_task.values()):
         del stats["misses"]
     return entry
@@ -319,8 +319,8 @@ def fit_job(trials_path: Path, trials: list[dict], design: int, lo: float, hi: f
 
 
 def fit_jobs(jobs: dict[str, tuple]) -> dict[str, dict | None]:
-    """Frames by run name for the searches whose fit is missing, one fit per thread."""
-    with ThreadPoolExecutor(8) as pool:
+    """Frames by run name for the searches whose fit is missing, one fit per thread (a 2000-trial fit holds ~300 MB, so few threads)."""
+    with ThreadPoolExecutor(min(4, os.cpu_count() or 1)) as pool:
         return dict(zip(jobs, pool.map(lambda job: fit_job(*job), jobs.values())))
 
 
@@ -339,14 +339,12 @@ def load_bo(run_dir: Path, summary: dict) -> dict:
     if not trials:
         return {}
     rng, design = summary["theta_range"], summary["design"]
-    thetas = rnd_array([t["theta"] for t in trials])
-    rows = [
-        dict(trial=t["trial"], design=t["design"], baseline=t["baseline"], theta=theta, value=rnd(t["value"]), sem=rnd(t["sem"], 3))
-        for t, theta in zip(trials, thetas)
-    ]
+    # columnar (trial i = position i): a row-per-trial dict costs ~5x the bytes over 600+ searches
+    flag = lambda name: [i for i, t in enumerate(trials) if t[name]]
+    columns = dict(theta=rnd_array([t["theta"] for t in trials]), value=[rnd(t["value"]) for t in trials], sem=[rnd(t["sem"], 3) for t in trials], design=flag("design"), baseline=flag("baseline"), dim=len(trials[0]["theta"]))
     fitted, gp = cached_frames(trials_path)
     job = None if fitted else (trials_path, trials, design, -rng, rng)
-    return dict(bo=dict(trials=rows, range=rng, gp=gp), job=job)
+    return dict(bo=dict(trials=columns, range=rng, gp=gp), job=job)
 
 
 def eta(step: int, max_steps: int, rate: float | None, last_activity: float, grace_hours: float) -> dict:
@@ -472,6 +470,7 @@ def collect(baselines_dir: Path, runs_dir: Path, workers: int = 1, every: int = 
         gp_conn, child_conn = ctx.Pipe()
         gp_proc = ctx.Process(target=gp_server, args=(child_conn,), daemon=True)
         gp_proc.start()
+        child_conn.close()  # else a killed helper never shows as EOF on gp_conn
     # the run.json walk is NFS-bound and the cache replay CPU-bound: overlap them
     with ThreadPoolExecutor(1) as pool:
         jsons = pool.submit(run_jsons, runs_dir)
@@ -502,8 +501,13 @@ def collect(baselines_dir: Path, runs_dir: Path, workers: int = 1, every: int = 
 
     # searches whose newest batch had no fit yet: splice the frames into their fragments
     if workers > 1:
-        gp_conn.send(jobs)
-        frames = gp_conn.recv()
+        # an OOM-killed helper (12 GB cgroups on interactive nodes) surfaces as EOF: fit inline instead
+        try:
+            gp_conn.send(jobs)
+            frames = gp_conn.recv()
+        except (EOFError, BrokenPipeError):
+            print(f"GP helper died (exit {gp_proc.exitcode}); fitting {len(jobs)} searches inline", flush=True)
+            frames = fit_jobs(jobs)
         gp_proc.join()
     else:
         frames = fit_jobs(jobs)
