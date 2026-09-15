@@ -219,6 +219,9 @@ def run(args: argparse.Namespace, adapter: type[Adapter], search: bo.Search, los
     def on_snapshot(step: int, current: dict) -> None:
         """Snapshot+eval the GP's current pick at GP-guided trial 1, 2, 4, ...; an unchanged pick just copies the previous snapshot."""
         last = step == args.n_evals
+        # a finish-only resume owes nothing when the last snapshot already carries its eval@4
+        if last and (out / "snapshots" / f"step-{step:06d}" / "eval@4" / "summary.json").is_file():
+            return
         if last_snapshot.get("theta") == current["theta"] and not last:
             shutil.copytree(last_snapshot["dir"], out / "snapshots" / f"step-{step:06d}", dirs_exist_ok=True)
             return

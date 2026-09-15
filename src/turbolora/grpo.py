@@ -246,6 +246,20 @@ def run(
         if not (husk / "adapter_model.safetensors").is_file():
             shutil.rmtree(husk, ignore_errors=True)
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
+    # a kill between the final eval@4 (written only at the last step) and the stamp leaves a finished run with no
+    # checkpoint: stamp it from the snapshot and curves instead of retraining from scratch
+    snapshots = sorted(Path(args.out).glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1]))
+    if not last_checkpoint and snapshots and (snapshots[-1] / "eval@4" / "summary.json").is_file():
+        curves = [json.loads(line) for line in (Path(args.out) / "curves.jsonl").read_text().splitlines()]
+        run_json = Path(args.out) / "run.json"
+        summary = json.loads(run_json.read_text()) | dict(
+            steps=int(snapshots[-1].name.split("-")[1]),
+            train_hours=round(max(r.get("elapsed_hours", 0) for r in curves), 3),
+            peak_vram_gb=round(max(r.get("peak_vram_gib", 0) for r in curves), 2),
+        )
+        run_json.write_text(json.dumps(summary, indent=1))
+        print(f"already finished at step {summary['steps']}: stamped run.json, nothing to train")
+        return
     bases_export = final_adapter / "adapter_model.safetensors"
     bases = None
     if last_checkpoint:

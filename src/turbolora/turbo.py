@@ -202,6 +202,7 @@ def search(
         return trials[int(means.argmax())], means.max().item()
 
     stop = argparse.Namespace(requested=False)
+    last_snapshot_done = False
     for sig in (signal.SIGUSR1, signal.SIGTERM):
         signal.signal(sig, lambda *_: setattr(stop, "requested", True))
     while (
@@ -268,9 +269,13 @@ def search(
             and (not step & (step - 1) or step == args.n_evals)
         ):
             on_snapshot(step, region_pick(state)[0])
+            last_snapshot_done = step == args.n_evals
     if stop.requested:
         print("stopped on signal; rerun to resume")
         return None
+    # a resume that finds every batch done never enters the loop, so the last snapshot may still be owed
+    if on_snapshot and not last_snapshot_done:
+        on_snapshot(args.n_evals, region_pick(state)[0])
 
     chosen, posterior_mean = region_pick(state)
     baseline = torch.tensor([t["value"] for t in trials if t["baseline"]])
