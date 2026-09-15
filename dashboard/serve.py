@@ -30,6 +30,8 @@ def task_names() -> list[str]:
 
 
 EVAL_TASKS = [t for t in task_names() if not t.startswith(("easy", "medium", "hard"))]
+# a run's eval on its own training tier (eval.py --split train writes eval@K/<tier>-train.json.gz) shows as the pseudo-task `train` under objective K
+task_of = lambda name: "train" if re.fullmatch(r"(easy|medium|hard)-train", name) else name if name in EVAL_TASKS else None
 # eval objective -> eval dir of `turbolora.eval` (<snapshot>/eval@K/<task>.json.gz + summary.json); curve keys are <key>_<task>
 OBJECTIVES = {"greedy": dict(dir="eval@1", key="eval", label="Greedy"), "sampled": dict(dir="eval@4", key="eval@4", label="4 samples · T=1")}
 
@@ -114,9 +116,10 @@ def save_task_cache() -> None:
 def read_task(path: Path) -> dict:
     with gzip.open(path, "rb") as f:
         data = orjson.loads(f.read())
+    # no miss drawer for the train split: its ~8k questions would swell the pooled question index on every page
     misses = [
         dict(question=r["question"][:240], predicted=r["predicted"], answer=r["answer"])
-        for r in data["records"]
+        for r in (data["records"] if data.get("split", "test") == "test" else [])
         if not (all(r["correct"]) if isinstance(r["correct"], list) else r["correct"])
     ]
     stats = {k: v for k, v in data.items() if k != "records"}
@@ -170,7 +173,7 @@ def parse_curves(curves: Path) -> list[dict]:
 
 def task_files(snapshot: Path, eval_dir: str) -> dict[str, Path]:
     """<task>.json.gz files of one eval objective (<snapshot>/<eval_dir>), keyed by task."""
-    return {p.stem.removesuffix(".json"): p for p in sorted((snapshot / eval_dir).glob("*.json.gz")) if p.stem.removesuffix(".json") in EVAL_TASKS}
+    return {task: p for p in sorted((snapshot / eval_dir).glob("*.json.gz")) if (task := task_of(p.stem.removesuffix(".json")))}
 
 
 def snapshot_summaries(run_dir: Path) -> dict[Path, dict[str, dict[str, dict]]]:
@@ -187,14 +190,14 @@ def snapshot_summaries(run_dir: Path) -> dict[Path, dict[str, dict[str, dict]]]:
                 stats = orjson.loads((snapshot / obj["dir"] / "summary.json").read_bytes())
             except FileNotFoundError:
                 stats = {}
-            summaries[snapshot][obj["dir"]] = {task: st for task, st in stats.items() if task in EVAL_TASKS}
+            summaries[snapshot][obj["dir"]] = {task_of(name): st for name, st in stats.items() if task_of(name)}
     return summaries
 
 
 def last_full_eval(evaluated: dict[Path, dict[str, dict]]) -> Path | None:
-    """The newest snapshot evaluated on every task any snapshot of this run has (a running job writes evals one task at a time)."""
-    full = set().union(*map(set, evaluated.values())) if evaluated else set()
-    complete = [s for s, done in evaluated.items() if set(done) == full]
+    """The newest snapshot evaluated on every benchmark any snapshot of this run has (a running job writes evals one task at a time); the train-set eval is optional."""
+    full = set().union(*map(set, evaluated.values())) - {"train"} if evaluated else set()
+    complete = [s for s, done in evaluated.items() if set(done) >= full]
     return complete[-1] if complete and full else None
 
 
@@ -412,10 +415,11 @@ def load_run(run_json: Path) -> dict | None:
     if summary["loss"] in ("bo", "turbo"):
         summary |= dict(adapter=f"{summary['adapter']}-{summary['loss']}")
     summaries = snapshot_summaries(run_dir)
+    file_of = lambda task: f"{summary['task']}-train" if task == "train" else task
     evals, eval_step = {}, {}
     for name, obj in OBJECTIVES.items():
         last = last_full_eval({s: per_obj[obj["dir"]] for s, per_obj in summaries.items()})
-        evals[name] = {task: load_task(last / obj["dir"] / f"{task}.json.gz") for task in summaries[last][obj["dir"]]} if last else {}
+        evals[name] = {task: load_task(last / obj["dir"] / f"{file_of(task)}.json.gz") for task in summaries[last][obj["dir"]]} if last else {}
         if last:
             eval_step[name] = step_of(last)
     curves = sorted(load_curves(run_dir) + eval_curves(summaries), key=lambda row: row.get("step", 0))
@@ -454,7 +458,7 @@ def scan_slice(base_dirs: list[Path], jsons: list[Path], runs_dir: Path, every: 
 def assemble(fragments: dict[str, bytes], models: list[str], questions: dict) -> bytes:
     """The page payload from per-entry JSON fragments (already safe inside a <script> tag)."""
     obj = lambda names: b"{" + b",".join(orjson.dumps(n) + b":" + fragments[n] for n in names) + b"}"
-    head = orjson.dumps(dict(tasks=EVAL_TASKS, objectives=OBJECTIVES, questions=questions))[:-1].replace(b"</", b"<\\/")
+    head = orjson.dumps(dict(tasks=EVAL_TASKS + ["train"], objectives=OBJECTIVES, questions=questions))[:-1].replace(b"</", b"<\\/")
     runs = [n for n in fragments if n not in models]
     return head + b',"models":' + obj(models) + b',"runs":' + obj(runs) + b"}"
 
