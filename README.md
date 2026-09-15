@@ -61,7 +61,7 @@ diverged. Since all these adapters share the same frozen U, Σ, Vᵀ, equal ‖�
 
 `tinylora` is always r=2 tied; b in the turbo column is `--batch`. Every turbo cell also has a `-t1` twin
 (`--no-greedy`): the same (batch, prompts, 1 completion) split, but scored on completions sampled at T=1 exactly as
-GRPO's rollouts are, instead of greedy ones (`tmp/tools/launch_noisy.sh` submits the twins of every existing cell). Every one of the 24 models in `models.py`
+GRPO's rollouts are, instead of greedy ones (`slurm/sweep.py` owns the grid: seeds 0-2 everywhere, 0-7 for `tinylora` u ∈ {1,2,4} and their b4 `-t1` turbo twins). Every one of the 24 models in `models.py`
 also has an untrained baseline (all six eval tasks at eval@1 and eval@4), including the ones no adapter was
 trained on.
 
@@ -81,10 +81,10 @@ src/turbolora/
   bo.py              fixed-noise GP on logit pass rates, trial log, posterior-mean pick
   turbo.py           TuRBO-1 trust-region search on bo.py's GP
   train_bo.py        search objective (TinyLoRA θ = every v concatenated; `--untie` for one v per module): vLLM pass rate on a random train subset
-  train_turbolora.py TuRBO entry point (slurm/bo.sh)
+  train_turbolora.py TuRBO entry point (slurm/train_turbo.sh)
   eval.py            greedy vLLM eval of a base model or a trained adapter
-slurm/               baseline.sh, train.sh, bo.sh, eval.sh (job setup shared via common.sh, family.sh);
-                     resume_sweep.sh resubmits unfinished runs, resume_watch.sh loops it until the sweep is idle
+slurm/               one seed-array job per adapter (train_{lora,loraxs,tinylora,turbo}.sh) + eval_{baseline,tasks,train}.sh;
+                     sweep.py = grid status/submit
 dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
                      uv run dashboard/build.py -> standalone dashboard.html snapshot to share
 tests/
@@ -97,28 +97,27 @@ Outputs are gitignored. Evals always land in an `eval@K/` dir (K=1 greedy, K=4 s
 
 ```bash
 # baseline eval of an untrained model
-MODEL=qwen2.5-7b TASKS="gsm8k math500" sbatch slurm/baseline.sh
+MODEL=qwen2.5-7b TASKS="gsm8k math500" sbatch slurm/eval_baseline.sh
 
-# GRPO, 3 seeds (array 0-2); CFG suffixes the run dir so configs of one adapter don't collide
-MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2 sbatch slurm/train.sh --rank 2
+# GRPO, one script per adapter, 3 seeds (array 0-2); CFG names the run dir and is parsed into the adapter's args
+MODEL=qwen2.5-7b TASK=hard CFG=r32 sbatch slurm/train_lora.sh              # lora-grpo/r32,          --rank 32
+MODEL=qwen2.5-7b TASK=hard CFG=r8 sbatch -a 0 slurm/train_loraxs.sh        # loraxs-grpo/r8 seed 0,  --rank 8
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8 sbatch slurm/train_tinylora.sh        # tinylora-grpo/r2-u8,    --rank 2 --proj-dim 8
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-notie sbatch slurm/train_tinylora.sh --untie   # extra args pass through; the cfg tail is free
 
-# single seed, rank sweep
-for r in 1 2 8 32; do MODEL=qwen2.5-7b TASK=hard ADAPTER=loraxs CFG=r$r sbatch -a 0 slurm/train.sh --rank $r; done
-MODEL=qwen2.5-7b TASK=hard ADAPTER=tinylora CFG=r2-notie sbatch -a 0 slurm/train.sh --rank 2 --untie
+# TuRBO twins (need the tinylora-grpo run with the same model/u/seed): r<rank>-u<u>-b<batch>[-t1], -t1 = sampled (GRPO T=1) objective
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b4 sbatch slurm/train_turbo.sh
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b4-t1 sbatch slurm/train_turbo.sh
 
-# BO, 3 seeds
-MODEL=qwen2.5-7b TASK=easy CFG=u1 sbatch slurm/bo.sh --proj-dim 1
-MODEL=qwen2.5-7b TASK=easy CFG=u1-notie sbatch slurm/bo.sh --proj-dim 1 --untie
-MODEL=qwen2.5-7b TASK=easy CFG=r2-u1-b1-t1 sbatch slurm/bo.sh --proj-dim 1 --batch 1 --no-greedy   # sampled (GRPO T=1) objective
+# the whole grid: coverage table, then submit whatever is short (dry-run prints the sbatch lines; --go submits)
+uv run slurm/sweep.py status
+uv run slurm/sweep.py submit [--go] [--only 'mistral-7b/tinylora-turbo']
 
 # eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
-ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval.sh
-SAMPLES=4 ADAPTERS=... sbatch slurm/eval.sh   # sampled eval@4 (T=1) instead of greedy eval@1
-TASKS=hard SPLIT=train MAX_TOKENS=1024 ADAPTERS=... sbatch slurm/eval.sh   # greedy on the run's own train tier at the training budget -> eval@1/hard-train.json.gz
+ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval_tasks.sh
+SAMPLES=4 ADAPTERS=... sbatch slurm/eval_tasks.sh   # sampled eval@4 (T=1) instead of greedy eval@1
+TASK=hard ADAPTERS=... sbatch slurm/eval_train.sh   # greedy on the run's own train tier at the training budget (1024 tokens) -> eval@1/hard-train.json.gz
 python3 tmp/tools/launch_train_eval.py   # GO=1: submit that for every finished tinylora run's last snapshot, batched per model on gpu-preempt
-
-# resubmit every run whose run.json lacks `steps`, skipping seeds already queued
-GO=1 slurm/resume_sweep.sh
 
 # locally / interactively
 uv run -m turbolora.train_tinylora --model qwen2.5-7b --task hard --out outputs/runs/x --max-steps 3

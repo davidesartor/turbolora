@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Iterator, Protocol
 
 from datasets import Dataset, load_dataset
+from huggingface_hub import hf_hub_download
 from math_verify import parse, verify
 from math_verify.errors import TimeoutException
 
@@ -77,11 +78,9 @@ class SimpleRLZoo(Task):
         self.config = config
 
     def __call__(self, split: str = "test") -> Dataset:
-        ds = load_dataset(
-            "hkust-nlp/SimpleRL-Zoo-Data",
-            data_files=f"{self.config}/{split}.parquet",
-            split="train",
-        )
+        # hub download (cache hit under HF_HUB_OFFLINE) instead of remote `data_files`, which never resolves offline
+        parquet = hf_hub_download("hkust-nlp/SimpleRL-Zoo-Data", f"{self.config}/{split}.parquet", repo_type="dataset")
+        ds = load_dataset("parquet", data_files=parquet, split="train")
         assert isinstance(ds, Dataset)
         ds = ds.map(
             lambda r: {

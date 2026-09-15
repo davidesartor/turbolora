@@ -103,7 +103,7 @@ def test_save_on_preempt_checkpoints_once_after_signal():
     callback.on_step_end(None, None, control)
     assert not control.should_save
 
-    # slurm/train.sh forwards both the wall-limit USR1 and the preemption TERM
+    # the slurm/*.sh trap forwards both the wall-limit USR1 and the preemption TERM
     for sig in (signal.SIGUSR1, signal.SIGTERM):
         os.kill(os.getpid(), sig)
         control.should_save = False
