@@ -29,9 +29,10 @@ def task_names() -> list[str]:
     return [ast.literal_eval(k) for k in tasks.value.keys]
 
 
-EVAL_TASKS = [t for t in task_names() if not t.startswith(("easy", "medium", "hard"))]
-# a run's eval on its own training tier (eval.py --split train writes eval@K/<tier>-train.json.gz) shows as the pseudo-task `train` under objective K
-task_of = lambda name: "train" if re.fullmatch(r"(easy|medium|hard)-train", name) else name if name in EVAL_TASKS else None
+TRAIN_TASKS = ("easy", "medium", "hard", "gsm8k", "math")  # gsm8k doubles as an eval task; the full-MATH test (5000) is never evaluated
+EVAL_TASKS = [t for t in task_names() if t not in ("easy", "medium", "hard", "math")]
+# a run's eval on its own training set (eval.py --split train writes eval@K/<task>-train.json.gz) shows as the pseudo-task `train` under objective K
+task_of = lambda name: "train" if re.fullmatch(f"({'|'.join(TRAIN_TASKS)})-train", name) else name if name in EVAL_TASKS else None
 # eval objective -> eval dir of `turbolora.eval` (<snapshot>/eval@K/<task>.json.gz + summary.json); curve keys are <key>_<task>
 OBJECTIVES = {"greedy": dict(dir="eval@1", key="eval", label="Greedy"), "sampled": dict(dir="eval@4", key="eval@4", label="4 samples · T=1")}
 

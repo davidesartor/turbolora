@@ -21,6 +21,8 @@ GRID = {  # model -> (train tier, turbo/tinylora u's); ranks and batches are the
     "qwen2.5-7b": ("hard", QWEN_U), "qwen2.5-7b-instruct": ("hard", QWEN_U), "qwen2.5-7b-math": ("hard", QWEN_U),
     "llama3.1-8b": ("hard", OTHER_U), "mistral-7b": ("hard", OTHER_U), "deepseek-7b-math": ("hard", OTHER_U),
 }
+# distribution-shift check (2026-09-17): the TinyLoRA cells again on a single-source train set, cfg tagged `-<task>`
+EXTRA_TASKS = {m: ("math", (1, 2, 4, 8, 16)) for m in ("qwen2.5-1.5b", "qwen2.5-1.5b-math", "qwen2.5-7b", "qwen2.5-7b-math")}
 DEEP_SEEDS, DEEP_US = 8, (1, 2, 4)  # tinylora-grpo r2-u{1,2,4} and their noisy turbo b4-t1 twins get seeds 0-7 (2026-09-15), the rest 0-2
 SCRIPT = {"lora-grpo": "train_lora", "loraxs-grpo": "train_loraxs", "tinylora-grpo": "train_tinylora", "tinylora-turbo": "train_turbo"}
 CARDS_40G = "l40s|a100-40g|a100-80g|h100"
@@ -28,18 +30,26 @@ CARDS_24G = "l4|a40|" + CARDS_40G
 CARDS_7B_TURBO = "a40|" + CARDS_40G  # 7B turbo on an L4 takes ~18 min/trial
 
 
-def cells(us: tuple[int, ...]) -> list[tuple[str, str, int]]:
-    """(adapter-loss dir, cfg, seeds) for every cell of one model's row, in submission order (noisy turbo twins before greedy)."""
-    turbo = [f"r2-u{u}-b{b}" for u in us for b in (1, 4)]
+def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
+    """(adapter-loss dir, cfg, seeds) for every cell of one model's row, in submission order (noisy turbo twins before greedy).
+
+    A `tag` (a non-default train set) names TinyLoRA-only cells `<cfg>-<tag>`.
+    """
+    turbo = [f"r2-u{u}-b{b}{tag}" for u in us for b in (1, 4)]
     deep = lambda u: DEEP_SEEDS if u in DEEP_US else 3
     return (
-        [("lora-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
-        + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
-        + [("tinylora-grpo", f"r2-u{u}", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b4-t1", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b1-t1", 3) for u in us]
+        [] if tag else [("lora-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)] + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
+    ) + (
+        [("tinylora-grpo", f"r2-u{u}{tag}", deep(u)) for u in us]
+        + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", deep(u)) for u in us]
+        + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", 3) for u in us]
         + [("tinylora-turbo", cfg, 3) for cfg in turbo]
     )
+
+
+def twin_cfg(turbo_cfg: str) -> str:
+    """tinylora-grpo cfg a turbo cfg searches from: drop `-b<batch>[-t1]`, keep any train-set tag (`r2-u8-b4-t1-math` -> `r2-u8-math`)."""
+    return re.sub(r"-b\d+(-t1)?", "", turbo_cfg)
 
 
 def queued_jobs() -> dict[tuple[str, int], dict]:
@@ -104,8 +114,10 @@ def scan(only: str | None) -> list[dict]:
     """Every grid seed with its state, in grid order."""
     queued = queued_jobs()
     rows = []
-    for model, (task, us) in GRID.items():
-        for adapter, cfg, n_seeds in cells(us):
+    grid = [(model, task, cells(us)) for model, (task, us) in GRID.items()]
+    grid += [(model, task, cells(us, f"-{task}")) for model, (task, us) in EXTRA_TASKS.items()]
+    for model, task, model_cells in grid:
+        for adapter, cfg, n_seeds in model_cells:
             if only and not re.search(only, f"{model}/{adapter}/{cfg}"):
                 continue
             cfg_dir = RUNS / MODELS[model].family / model / adapter / cfg
@@ -182,26 +194,37 @@ def submit(rows: list[dict], go: bool, stagger: int) -> None:
             opts = ["-p", "gpu,gpu-preempt", "-q", "normal", "--requeue", f"--comment={r['cfg_dir']}/seed{r['seed']}"]
             sbatch(dict(SAMPLES="4", ADAPTERS=str(snapshot)), [*opts, "slurm/eval_tasks.sh"], go)
 
-    delay, waiting_on_twin = 0, 0
+    delay, waiting_on_twin, queued = 0, 0, queued_jobs()
     for (model, task, adapter, cfg, cfg_dir), seeds in groupby(rows, ("model", "task", "adapter", "cfg", "cfg_dir")).items():
         seeds = [s for s in seeds if s["state"] in ("partial", "missing")]
-        # turbo takes its SVD bases from the tinylora-grpo twin's export (written at its first start) and lora_v from a
-        # snapshot or checkpoint of it (first at step 1): nothing to launch before both exist
-        if adapter == "tinylora-turbo":
-            twin = cfg_dir.parent.parent / "tinylora-grpo" / cfg.split("-b")[0]
-            waiting = [s["seed"] for s in seeds if not twin_ready(twin / f"seed{s['seed']}")]
-            waiting_on_twin += len(waiting)
-            seeds = [s for s in seeds if s["seed"] not in waiting]
-        if not seeds:
-            continue
         small = model.startswith("qwen2.5-1.5b")
         constraint = CARDS_24G if small else CARDS_7B_TURBO if adapter == "tinylora-turbo" else CARDS_40G
-        # HF 429s and node black-holes when many jobs start at once: stagger the starts
-        opts = ["-a", ",".join(str(s["seed"]) for s in seeds), f"--comment={cfg_dir}", f"--constraint={constraint}"]
-        if delay:
-            opts.append(f"--begin=now+{delay}seconds")
-        sbatch(dict(MODEL=model, TASK=task, CFG=cfg), [*opts, f"slurm/{SCRIPT[adapter]}.sh"], go)
-        delay += stagger
+
+        def launch(seeds: list[dict], extra: list[str] = []) -> None:
+            nonlocal delay
+            # HF 429s and node black-holes when many jobs start at once: stagger the starts (chained jobs are spread by their twins)
+            opts = ["-a", ",".join(str(s["seed"]) for s in seeds), f"--comment={cfg_dir}", f"--constraint={constraint}", *extra]
+            if delay and not extra:
+                opts.append(f"--begin=now+{delay}seconds")
+            sbatch(dict(MODEL=model, TASK=task, CFG=cfg), [*opts, f"slurm/{SCRIPT[adapter]}.sh"], go)
+            delay += stagger if not extra else 0
+
+        # turbo takes its SVD bases from the tinylora-grpo twin's export (written at its first start) and lora_v from a
+        # snapshot or checkpoint of it (first at step 1): a seed whose twin is queued or running is chained to it with
+        # `after:<twin>+30` (starts 30 min after the twin first starts, when both files exist; a twin killed before that
+        # releases it too, the turbo then fails fast and comes back as `partial` for the next submit), the rest wait
+        if adapter == "tinylora-turbo":
+            twin = cfg_dir.parent.parent / "tinylora-grpo" / twin_cfg(cfg)
+            ready = [s for s in seeds if twin_ready(twin / f"seed{s['seed']}")]
+            for s in seeds:
+                twin_job = queued.get((str(twin), s["seed"]))
+                if s not in ready and twin_job:
+                    launch([s], [f"--dependency=after:{twin_job['job']}+30"])
+                elif s not in ready:
+                    waiting_on_twin += 1
+            seeds = ready
+        if seeds:
+            launch(seeds)
     if waiting_on_twin:
         print(f"{waiting_on_twin} turbo seeds wait for their tinylora-grpo twin's final_adapter")
 

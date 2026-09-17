@@ -6,7 +6,7 @@ import signal
 from contextlib import contextmanager
 from typing import Iterator, Protocol
 
-from datasets import Dataset, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 from huggingface_hub import hf_hub_download
 from math_verify import parse, verify
 from math_verify.errors import TimeoutException
@@ -104,6 +104,18 @@ class GSM8K(Task):
         return ds.map(lambda r: {"answer": self.format_answer(r["answer"])})
 
 
+class Math(Task):
+    """Full Hendrycks MATH (7500 train / 5000 test, all levels); the gold is the solution's last \\boxed{}."""
+
+    SUBJECTS = ["algebra", "counting_and_probability", "geometry", "intermediate_algebra", "number_theory", "prealgebra", "precalculus"]
+
+    def __call__(self, split: str = "test") -> Dataset:
+        ds = concatenate_datasets([load_from_hf("EleutherAI/hendrycks_math", subject, split) for subject in self.SUBJECTS])
+        ds = ds.rename_column("problem", "question")
+        ds = ds.map(lambda r: {"answer": extract(r["solution"]) or ""})
+        return ds.select_columns(["question", "answer"]).filter(lambda r: bool(r["answer"]))
+
+
 class Math500(Task):
     def __call__(self, split: str = "test") -> Dataset:
         ds = load_from_hf("HuggingFaceH4/MATH-500", split=split)
@@ -152,7 +164,8 @@ TASKS: dict[str, Task] = {
     "easy": SimpleRLZoo("simplelr_qwen_gsm8k_level1"),  # GSM8K + MATH level 1
     "medium": SimpleRLZoo("simplelr_qwen_level1to4"),
     "hard": SimpleRLZoo("simplelr_qwen_level3to5"),
-    "gsm8k": GSM8K(),
+    "gsm8k": GSM8K(),  # train split = GSM8K train (7473), same distribution as its test set
+    "math": Math(),  # train split = MATH train (7500), same level/subject mix as MATH-500
     "math500": Math500(),
     "aime24": AIME24(),
     "amc23": AMC23(),

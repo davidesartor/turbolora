@@ -2,6 +2,7 @@
 # Greedy eval of adapters on their own train tier at the training budget -> eval@K/<tier>-train.json.gz.
 # Usage: TASK=hard ADAPTERS="outputs/runs/.../snapshots/step-000393 ..." [SAMPLES=4] sbatch slurm/eval_train.sh
 # Batches: PLAN=<file> of lines `<samples> <task> <adapters...>` instead, one engine load per line; --skip-existing makes a requeue resume.
+# tmp/tools/launch_train_eval.py cuts pending adapters into ~18-h plans so nothing needs more than a day.
 # 1.5B fits the short QOS: sbatch -p gpu -q short -t 04:00:00 --no-requeue --constraint='l4|a40|l40s|a100-40g|a100-80g|h100'
 #SBATCH -J eval_train
 #SBATCH -p gpu,gpu-preempt
@@ -11,7 +12,7 @@
 #SBATCH --constraint=l40s|a100-40g|a100-80g|h100
 #SBATCH -c 8
 #SBATCH --mem=60G
-#SBATCH -t 7-00:00:00
+#SBATCH -t 24:00:00
 #SBATCH -o .slurm-logs/%x-%j.out
 
 set -e

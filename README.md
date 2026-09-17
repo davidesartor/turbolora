@@ -68,7 +68,7 @@ export (`--bases`). Resumes from `trials.json`.
 ```
 src/turbolora/
   models.py          MODELS: HF id + raw-text prompt style (Qwen2.5, Llama 3, Mistral/Ministral, DeepSeek)
-  tasks.py           TASKS: SimpleRL-Zoo tiers (easy/medium/hard) for training, gsm8k/math500/aime24/amc23/minerva/olympiad for eval; extract/grade/reward
+  tasks.py           TASKS: SimpleRL-Zoo tiers (easy/medium/hard) plus single-source gsm8k/math (GSM8K train, full MATH train) for training, gsm8k/math500/aime24/amc23/minerva/olympiad for eval; extract/grade/reward
   adapters.py        adapter attach/export
   grpo.py            shared GRPO/GSPO trainer (Unsloth + TRL), preempt-safe checkpoints
   train_{lora,loraxs,tinylora}.py   GRPO entry points
@@ -111,6 +111,7 @@ MODEL=qwen2.5-7b TASK=hard CFG=r32 sbatch slurm/train_lora.sh              # lor
 MODEL=qwen2.5-7b TASK=hard CFG=r8 sbatch -a 0 slurm/train_loraxs.sh        # loraxs-grpo/r8 seed 0,  --rank 8
 MODEL=qwen2.5-7b TASK=hard CFG=r2-u8 sbatch slurm/train_tinylora.sh        # tinylora-grpo/r2-u8,    --rank 2 --proj-dim 8
 MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-notie sbatch slurm/train_tinylora.sh --untie   # extra args pass through; the cfg tail is free
+MODEL=qwen2.5-7b TASK=math CFG=r2-u8-math sbatch slurm/train_tinylora.sh           # single-source train set (gsm8k | math); run dirs don't carry the task, so tag the cfg
 
 # TuRBO twins (need the tinylora-grpo run with the same model/u/seed): r<rank>-u<u>-b<batch>[-t1], -t1 = sampled (GRPO T=1) objective
 MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b4 sbatch slurm/train_turbo.sh

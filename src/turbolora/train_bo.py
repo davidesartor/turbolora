@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import re
 import shutil
 import time
 from pathlib import Path
@@ -73,7 +74,11 @@ def grpo_bases(args: argparse.Namespace) -> tuple[Path, dict[str, Tensor]]:
     """
     path = args.bases
     if path is None:
-        run = Path("outputs/runs") / MODELS[args.model].family / args.model / "tinylora-grpo" / f"r{args.rank}-u{args.proj_dim}" / f"seed{args.seed}"
+        # under the sweep layout (.../tinylora-turbo/<cfg>/seedN) the twin is tinylora-grpo/<cfg minus -b<batch>[-t1]>/seedN, so a
+        # train-set tag on the cfg carries over; elsewhere fall back to the grid's plain r<rank>-u<proj_dim>
+        out = Path(args.out).resolve()
+        cfg = re.sub(r"-b\d+(-t1)?", "", out.parent.name) if out.parents[1].name == "tinylora-turbo" else f"r{args.rank}-u{args.proj_dim}"
+        run = Path("outputs/runs") / MODELS[args.model].family / args.model / "tinylora-grpo" / cfg / f"seed{args.seed}"
         path = run / "final_adapter" / "adapter_model.safetensors"
         if not path.is_file():
             raise FileNotFoundError(f"BO needs a reference run to fix the SVD signs: no {path}; pass --bases")

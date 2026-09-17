@@ -114,6 +114,7 @@ TEST_SIZES = {
     "easy": 500,
     "medium": 500,
     "hard": 500,
+    "math": 5000,
     "math500": 500,
     "aime24": 30,
     "amc23": 40,
@@ -143,7 +144,7 @@ def test_gold_grades_against_itself(task):
     assert bad == UNGRADEABLE_GOLD.get(task, [])
 
 
-TRAIN_SIZES = {"gsm8k": 7473, "easy": 8388, "medium": 8139, "hard": 8521}
+TRAIN_SIZES = {"gsm8k": 7473, "math": 7500, "easy": 8388, "medium": 8139, "hard": 8521}
 
 
 @pytest.mark.parametrize("task", TRAIN_SIZES)
@@ -160,3 +161,11 @@ def test_tiers_are_paper_difficulty_bands():
     assert not any(q.startswith("<|im_start|>") for q in easy["question"])
     assert set(TASKS["gsm8k"]("train")["question"]) < set(easy["question"])
     assert len(TASKS["hard"]("train")) == 2514 + 2648 + 3361 - 2  # minus the two without gold
+
+
+def test_math500_is_math_test_subset():
+    """MATH-500 is drawn from the MATH test split with the same gold, so `math` (train) and `math500` (eval) share a distribution."""
+    gold = dict(zip(*(TASKS["math"]("test")[c] for c in ("question", "answer"))))
+    m500 = TASKS["math500"]("test")
+    assert all(q in gold and grade(gold[q], a) for q, a in zip(m500["question"], m500["answer"]))
+    assert not set(m500["question"]) & set(TASKS["math"]("train")["question"])
