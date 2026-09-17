@@ -265,8 +265,13 @@ def run(
     if last_checkpoint:
         bases = {k: v for k, v in load_file(f"{last_checkpoint}/adapter_model.safetensors").items() if ".lora_" in k}
     elif bases_export.is_file():
-        # a fresh start over an export (e.g. a twin's copied final_adapter) pins U to that export's lora_B too
+        # a fresh start over an export (e.g. a twin's copied final_adapter) pins U to that export's lora_B too; the export
+        # strips lora_v, so a run killed before its first checkpoint (step 25) takes v from the snapshot the export was made at
         bases = {k: v for k, v in load_file(bases_export).items() if ".lora_" in k}
+        if snapshots and (snapshots[-1] / "trainable.safetensors").is_file():
+            vs = {k.removesuffix(".default"): v for k, v in load_file(snapshots[-1] / "trainable.safetensors").items()}
+            for name in [k.removesuffix(".lora_B.weight") for k in bases if k.endswith(".lora_B.weight")]:
+                bases[f"{name}.lora_v"] = vs[f"{name}.lora_v"] if len(vs) > 1 else next(iter(vs.values()))
     model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, bases=bases, **adapter_kwargs)
     if not (final_adapter / "adapter_model.safetensors").is_file():
         adapter.export(model, str(final_adapter))
