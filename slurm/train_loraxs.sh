@@ -27,6 +27,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 OUT="outputs/runs/$("$HOME/.local/bin/uv" run python -c "from turbolora.models import MODELS; print(MODELS['${MODEL:?}'].family)")/${MODEL}/loraxs-grpo/${CFG}/seed${SLURM_ARRAY_TASK_ID:?}"
 scontrol update job="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}" comment="$OUT" || true
 
+# a run stamped before a requeue (ghost job after a node/DNS hiccup) is done: don't reload the model to rediscover that
+grep -q train_hours "$OUT/run.json" 2>/dev/null && { echo "$OUT already finished"; exit 0; }
+
 # forward slurm's signals (preemption TERM with 900s grace, wall-limit USR1) to python as USR1 so it checkpoints; `wait` returns
 # early on a trapped signal (128+sig, fatal under set -e), so keep waiting until python actually exits and return its real code
 trap 'kill -USR1 "$pid"' USR1 TERM
