@@ -1,6 +1,6 @@
 """Paper-grid sweep driver: `status` prints coverage per cell, `submit` (dry-run unless --go) launches, resumes, stamps and backfills whatever is short.
 
-Usage: uv run slurm/sweep.py status | submit [--go] [--only <model/adapter/cfg regex>] [--stagger 45]
+Usage: uv run slurm/sweep.py status | submit [--go] [--only <model/adapter/cfg regex>] [--stagger 45] [--time 2:00:00]
 """
 
 import argparse
@@ -83,7 +83,10 @@ def seed_status(seed_dir: Path, adapter: str, queued: dict | None) -> tuple[str,
     """(state, detail): done | no-eval4 | unstamped | running | queued | hung | partial | missing."""
     if not seed_dir.is_dir():
         return ("queued" if queued else "missing"), ""
-    run = json.loads((seed_dir / "run.json").read_text()) if (seed_dir / "run.json").is_file() else {}
+    try:  # a seed dir archived for a rerun can vanish mid-scan
+        run = json.loads((seed_dir / "run.json").read_text())
+    except FileNotFoundError:
+        run = {}
     step, snapshot = last_snapshot(seed_dir)
     has_eval4 = snapshot is not None and (snapshot / "eval@4" / "summary.json").is_file()
     if "steps" in run and has_eval4:
@@ -182,8 +185,11 @@ def twin_ready(grpo_seed: Path) -> bool:
     return has_bases and has_v
 
 
-def submit(rows: list[dict], go: bool, stagger: int) -> None:
+def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> None:
     """Stamp unstamped finishes, backfill missing eval@4, resume/launch every partial or missing seed (one array per cfg)."""
+    clock = ["-t", time_limit] if time_limit else []
+    # SBATCH_EXCLUDE is not a slurm input variable, so the node list has to go on the command line
+    off = ["-x", os.environ["EXCLUDE"]] if os.environ.get("EXCLUDE") else []
     for r in rows:
         if r["state"] == "hung":
             print(f"hung: {r['cfg_dir']}/seed{r['seed']} ({r['detail']}); scancel it and resubmit")
@@ -191,7 +197,7 @@ def submit(rows: list[dict], go: bool, stagger: int) -> None:
             stamp(r["cfg_dir"] / f"seed{r['seed']}", go)
         elif r["state"] == "no-eval4":
             _, snapshot = last_snapshot(r["cfg_dir"] / f"seed{r['seed']}")
-            opts = ["-p", "gpu,gpu-preempt", "-q", "normal", "--requeue", f"--comment={r['cfg_dir']}/seed{r['seed']}"]
+            opts = ["-p", "gpu,gpu-preempt", "-q", "normal", "--requeue", *clock, *off, f"--comment={r['cfg_dir']}/seed{r['seed']}"]
             sbatch(dict(SAMPLES="4", ADAPTERS=str(snapshot)), [*opts, "slurm/eval_tasks.sh"], go)
 
     delay, waiting_on_twin, queued = 0, 0, queued_jobs()
@@ -203,7 +209,7 @@ def submit(rows: list[dict], go: bool, stagger: int) -> None:
         def launch(seeds: list[dict], extra: list[str] = []) -> None:
             nonlocal delay
             # HF 429s and node black-holes when many jobs start at once: stagger the starts (chained jobs are spread by their twins)
-            opts = ["-a", ",".join(str(s["seed"]) for s in seeds), f"--comment={cfg_dir}", f"--constraint={constraint}", *extra]
+            opts = ["-a", ",".join(str(s["seed"]) for s in seeds), f"--comment={cfg_dir}", f"--constraint={constraint}", *clock, *off, *extra]
             if delay and not extra:
                 opts.append(f"--begin=now+{delay}seconds")
             sbatch(dict(MODEL=model, TASK=task, CFG=cfg), [*opts, f"slurm/{SCRIPT[adapter]}.sh"], go)
@@ -235,6 +241,7 @@ if __name__ == "__main__":
     parser.add_argument("--go", action="store_true", help="submit for real (default: print the sbatch lines)")
     parser.add_argument("--only", help="regex on <model>/<adapter-loss>/<cfg>")
     parser.add_argument("--stagger", type=int, default=45, help="seconds between array starts")
+    parser.add_argument("--time", help="sbatch -t for the launched jobs; short slices survive maintenance reservations, the watcher resubmits what times out")
     args = parser.parse_args()
     rows = scan(args.only)
-    status(rows) if args.command == "status" else submit(rows, args.go, args.stagger)
+    status(rows) if args.command == "status" else submit(rows, args.go, args.stagger, args.time)
