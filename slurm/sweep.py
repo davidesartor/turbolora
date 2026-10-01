@@ -17,17 +17,43 @@ RUNS = Path("outputs/runs")
 IDLE_HOURS = 3  # a running job whose progress file is older than this is stuck (math-verify hang)
 QWEN_U, OTHER_U = (1, 2, 4, 8, 16, 64, 256), (1, 2, 4, 8, 16)
 GRID = {  # model -> (train tier, turbo/tinylora u's); ranks and batches are the same everywhere
-    "qwen2.5-1.5b": ("easy", QWEN_U), "qwen2.5-1.5b-instruct": ("easy", QWEN_U), "qwen2.5-1.5b-math": ("easy", QWEN_U),
-    "qwen2.5-7b": ("hard", QWEN_U), "qwen2.5-7b-instruct": ("hard", QWEN_U), "qwen2.5-7b-math": ("hard", QWEN_U),
-    "llama3.1-8b": ("hard", OTHER_U), "mistral-7b": ("hard", OTHER_U), "deepseek-7b-math": ("hard", OTHER_U),
+    "qwen2.5-1.5b": ("easy", QWEN_U),
+    "qwen2.5-1.5b-instruct": ("easy", QWEN_U),
+    "qwen2.5-1.5b-math": ("easy", QWEN_U),
+    "qwen2.5-7b": ("hard", QWEN_U),
+    "qwen2.5-7b-instruct": ("hard", QWEN_U),
+    "qwen2.5-7b-math": ("hard", QWEN_U),
+    "llama3.1-8b": ("hard", OTHER_U),
+    "mistral-7b": ("hard", OTHER_U),
+    "deepseek-7b-math": ("hard", OTHER_U),
 }
 # distribution-shift check (2026-09-17): the TinyLoRA cells again on a single-source train set, cfg tagged `-<task>`
-EXTRA_TASKS = {m: ("math", (1, 2, 4, 8, 16)) for m in ("qwen2.5-1.5b", "qwen2.5-1.5b-math", "qwen2.5-7b", "qwen2.5-7b-math")}
-DEEP_SEEDS, DEEP_US = 8, (1, 2, 4)  # tinylora-grpo r2-u{1,2,4} and their noisy turbo b4-t1 twins get seeds 0-7 (2026-09-15), the rest 0-2
-SCRIPT = {"lora-grpo": "train_lora", "loraxs-grpo": "train_loraxs", "tinylora-grpo": "train_tinylora", "tinylora-turbo": "train_turbo"}
+EXTRA_TASKS = {
+    m: ("math", (1, 2, 4, 8, 16))
+    for m in ("qwen2.5-1.5b", "qwen2.5-1.5b-math", "qwen2.5-7b", "qwen2.5-7b-math")
+}
+DEEP_SEEDS, DEEP_US = 8, (
+    1,
+    2,
+    4,
+)  # tinylora-grpo r2-u{1,2,4} and their noisy turbo b4-t1 (2026-09-15) and b1-t1 (2026-10-01) twins get seeds 0-7, the rest 0-2
+SCRIPT = {
+    "lora-grpo": "train_lora",
+    "loraxs-grpo": "train_loraxs",
+    "tinylora-grpo": "train_tinylora",
+    "tinylora-turbo": "train_turbo",
+}
 CARDS_40G = "l40s|a100-40g|a100-80g|h100"
 CARDS_24G = "l4|a40|" + CARDS_40G
 CARDS_7B_TURBO = "a40|" + CARDS_40G  # 7B turbo on an L4 takes ~18 min/trial
+EVAL_TASKS = (
+    "gsm8k",
+    "math500",
+    "aime24",
+    "amc23",
+    "minerva",
+    "olympiad",
+)  # = grpo.EVAL_TASKS, which imports torch
 
 
 def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
@@ -38,11 +64,14 @@ def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
     turbo = [f"r2-u{u}-b{b}{tag}" for u in us for b in (1, 4)]
     deep = lambda u: DEEP_SEEDS if u in DEEP_US else 3
     return (
-        [] if tag else [("lora-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)] + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
+        []
+        if tag
+        else [("lora-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
+        + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
     ) + (
         [("tinylora-grpo", f"r2-u{u}{tag}", deep(u)) for u in us]
         + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", 3) for u in us]
+        + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", deep(u)) for u in us]
         + [("tinylora-turbo", cfg, 3) for cfg in turbo]
     )
 
@@ -54,7 +83,11 @@ def twin_cfg(turbo_cfg: str) -> str:
 
 def queued_jobs() -> dict[tuple[str, int], dict]:
     """(cfg dir, seed) -> job id/state/hours running; seed from the array index, else the comment."""
-    out = subprocess.run(["squeue", "--me", "-r", "-h", "-o", "%i %k %K %T %M"], capture_output=True, text=True).stdout
+    out = subprocess.run(
+        ["squeue", "--me", "-r", "-h", "-o", "%i %k %K %T %M"],
+        capture_output=True,
+        text=True,
+    ).stdout
     jobs = {}
     for line in out.splitlines():
         job, comment, index, state, elapsed = line.split()
@@ -62,17 +95,36 @@ def queued_jobs() -> dict[tuple[str, int], dict]:
             continue
         # seed = array index: `scontrol update job=$SLURM_JOB_ID` from one task used to retag the whole array with its seed dir;
         # non-array jobs (eval.sh backfills) carry the seed dir in the comment
-        cfg_dir, seed = re.sub(r"/seed\d+$", "", comment), re.search(r"/seed(\d+)$", comment)
+        cfg_dir, seed = re.sub(r"/seed\d+$", "", comment), re.search(
+            r"/seed(\d+)$", comment
+        )
         days, clock = elapsed.split("-") if "-" in elapsed else ("0", elapsed)
         parts = [int(x) for x in clock.split(":")]
-        hours = int(days) * 24 + sum(x / 60**i for i, x in enumerate(reversed(parts))) / 60
-        jobs[cfg_dir, int(index) if index != "N/A" else int(seed.group(1))] = dict(job=job, state=state, hours=hours)
+        hours = (
+            int(days) * 24 + sum(x / 60**i for i, x in enumerate(reversed(parts))) / 60
+        )
+        jobs[cfg_dir, int(index) if index != "N/A" else int(seed.group(1))] = dict(
+            job=job, state=state, hours=hours
+        )
     return jobs
 
 
 def last_snapshot(seed_dir: Path) -> tuple[int, Path | None]:
-    snapshots = sorted(seed_dir.glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1]))
-    return (int(snapshots[-1].name.split("-")[1]), snapshots[-1]) if snapshots else (0, None)
+    snapshots = sorted(
+        seed_dir.glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1])
+    )
+    return (
+        (int(snapshots[-1].name.split("-")[1]), snapshots[-1])
+        if snapshots
+        else (0, None)
+    )
+
+
+def eval_tasks_done(summary: Path) -> set[str]:
+    try:
+        return set(json.loads(summary.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
 
 
 def idle_hours(path: Path) -> float:
@@ -88,26 +140,38 @@ def seed_status(seed_dir: Path, adapter: str, queued: dict | None) -> tuple[str,
     except FileNotFoundError:
         run = {}
     step, snapshot = last_snapshot(seed_dir)
-    has_eval4 = snapshot is not None and (snapshot / "eval@4" / "summary.json").is_file()
+    # an eval@4 killed mid-way leaves a summary of only the tasks it finished
+    has_eval4 = snapshot is not None and set(EVAL_TASKS) <= eval_tasks_done(
+        snapshot / "eval@4" / "summary.json"
+    )
     if "steps" in run and has_eval4:
         return "done", f"step-{step}"
     if "steps" in run:
         return ("queued" if queued else "no-eval4"), f"step-{step}"
 
-    # progress of an unfinished run: trials for turbo, last curve step for GRPO
-    if adapter == "tinylora-turbo":
-        progress = seed_dir / "trials.json"
-        detail = f"{len(json.loads(progress.read_text()))}t" if progress.is_file() else "0t"
-    else:
-        progress = seed_dir / "curves.jsonl"
-        detail = f"{json.loads(progress.read_text().splitlines()[-1])['step']}s" if progress.is_file() else "0s"
+    # progress of an unfinished run: trials for turbo, last curve step for GRPO; a just-started run has the file but no record yet
+    turbo = adapter == "tinylora-turbo"
+    progress = seed_dir / ("trials.json" if turbo else "curves.jsonl")
+    text = progress.read_text() if progress.is_file() else ""
+    try:
+        detail = (
+            f"{len(json.loads(text))}t"
+            if turbo
+            else f"{json.loads(text.splitlines()[-1])['step']}s"
+        )
+    except (json.JSONDecodeError, IndexError):
+        detail = "0t" if turbo else "0s"
     if queued and queued["state"] == "RUNNING":
         stuck = queued["hours"] > IDLE_HOURS and idle_hours(progress) > IDLE_HOURS
         return ("hung" if stuck else "running"), f"{detail},{queued['job']}"
     if queued:
         return "queued", detail
     # GRPO killed between the final eval@4 and the run.json stamp: nothing left to train
-    live_checkpoints = [c for c in seed_dir.glob("checkpoint-*") if (c / "adapter_model.safetensors").is_file()]
+    live_checkpoints = [
+        c
+        for c in seed_dir.glob("checkpoint-*")
+        if (c / "adapter_model.safetensors").is_file()
+    ]
     if adapter != "tinylora-turbo" and has_eval4 and not live_checkpoints:
         return "unstamped", f"step-{step}"
     return "partial", detail
@@ -118,15 +182,31 @@ def scan(only: str | None) -> list[dict]:
     queued = queued_jobs()
     rows = []
     grid = [(model, task, cells(us)) for model, (task, us) in GRID.items()]
-    grid += [(model, task, cells(us, f"-{task}")) for model, (task, us) in EXTRA_TASKS.items()]
+    grid += [
+        (model, task, cells(us, f"-{task}"))
+        for model, (task, us) in EXTRA_TASKS.items()
+    ]
     for model, task, model_cells in grid:
         for adapter, cfg, n_seeds in model_cells:
             if only and not re.search(only, f"{model}/{adapter}/{cfg}"):
                 continue
             cfg_dir = RUNS / MODELS[model].family / model / adapter / cfg
             for seed in range(n_seeds):
-                state, detail = seed_status(cfg_dir / f"seed{seed}", adapter, queued.get((str(cfg_dir), seed)))
-                rows.append(dict(model=model, task=task, adapter=adapter, cfg=cfg, cfg_dir=cfg_dir, seed=seed, state=state, detail=detail))
+                state, detail = seed_status(
+                    cfg_dir / f"seed{seed}", adapter, queued.get((str(cfg_dir), seed))
+                )
+                rows.append(
+                    dict(
+                        model=model,
+                        task=task,
+                        adapter=adapter,
+                        cfg=cfg,
+                        cfg_dir=cfg_dir,
+                        seed=seed,
+                        state=state,
+                        detail=detail,
+                    )
+                )
     return rows
 
 
@@ -137,8 +217,14 @@ def status(rows: list[dict]) -> None:
         for cfg, seeds in groupby(row, ("cfg",)).items():
             done = sum(s["state"] == "done" for s in seeds)
             rest = ";".join(
-                f"{state}:" + ",".join(f"s{s['seed']}" + (f"({s['detail']})" if s["detail"] else "") for s in group)
-                for (state,), group in groupby([s for s in seeds if s["state"] != "done"], ("state",)).items()
+                f"{state}:"
+                + ",".join(
+                    f"s{s['seed']}" + (f"({s['detail']})" if s["detail"] else "")
+                    for s in group
+                )
+                for (state,), group in groupby(
+                    [s for s in seeds if s["state"] != "done"], ("state",)
+                ).items()
             )
             tags.append(f"{cfg[0]}:{done}/{len(seeds)}" + (f"[{rest}]" if rest else ""))
         print(f"{model:24} {adapter:15} " + "  ".join(tags))
@@ -158,7 +244,9 @@ def groupby(rows: list[dict], keys: tuple[str, ...]) -> dict[tuple, list[dict]]:
 def stamp(seed_dir: Path, go: bool) -> None:
     """Write the finish stamp grpo.run could not: steps from the last snapshot, hours/VRAM from curves.jsonl."""
     step, _ = last_snapshot(seed_dir)
-    curves = [json.loads(l) for l in (seed_dir / "curves.jsonl").read_text().splitlines()]
+    curves = [
+        json.loads(l) for l in (seed_dir / "curves.jsonl").read_text().splitlines()
+    ]
     summary = json.loads((seed_dir / "run.json").read_text()) | dict(
         steps=step,
         train_hours=round(max(r.get("elapsed_hours", 0) for r in curves), 3),
@@ -181,7 +269,9 @@ def sbatch(env: dict[str, str], args: list[str], go: bool) -> None:
 
 def twin_ready(grpo_seed: Path) -> bool:
     has_bases = (grpo_seed / "final_adapter" / "adapter_model.safetensors").is_file()
-    has_v = any(grpo_seed.glob("snapshots/step-*/trainable.safetensors")) or any(grpo_seed.glob("checkpoint-*/adapter_model.safetensors"))
+    has_v = any(grpo_seed.glob("snapshots/step-*/trainable.safetensors")) or any(
+        grpo_seed.glob("checkpoint-*/adapter_model.safetensors")
+    )
     return has_bases and has_v
 
 
@@ -192,27 +282,60 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
     off = ["-x", os.environ["EXCLUDE"]] if os.environ.get("EXCLUDE") else []
     for r in rows:
         if r["state"] == "hung":
-            print(f"hung: {r['cfg_dir']}/seed{r['seed']} ({r['detail']}); scancel it and resubmit")
+            print(
+                f"hung: {r['cfg_dir']}/seed{r['seed']} ({r['detail']}); scancel it and resubmit"
+            )
         elif r["state"] == "unstamped":
             stamp(r["cfg_dir"] / f"seed{r['seed']}", go)
         elif r["state"] == "no-eval4":
             _, snapshot = last_snapshot(r["cfg_dir"] / f"seed{r['seed']}")
-            opts = ["-p", "gpu,gpu-preempt", "-q", "normal", "--requeue", *clock, *off, f"--comment={r['cfg_dir']}/seed{r['seed']}"]
-            sbatch(dict(SAMPLES="4", ADAPTERS=str(snapshot)), [*opts, "slurm/eval_tasks.sh"], go)
+            opts = [
+                "-p",
+                "gpu,gpu-preempt",
+                "-q",
+                "normal",
+                "--requeue",
+                *clock,
+                *off,
+                f"--comment={r['cfg_dir']}/seed{r['seed']}",
+            ]
+            sbatch(
+                dict(SAMPLES="4", ADAPTERS=str(snapshot), TASKS=" ".join(EVAL_TASKS)),
+                [*opts, "slurm/eval_tasks.sh"],
+                go,
+            )
 
     delay, waiting_on_twin, queued = 0, 0, queued_jobs()
-    for (model, task, adapter, cfg, cfg_dir), seeds in groupby(rows, ("model", "task", "adapter", "cfg", "cfg_dir")).items():
+    for (model, task, adapter, cfg, cfg_dir), seeds in groupby(
+        rows, ("model", "task", "adapter", "cfg", "cfg_dir")
+    ).items():
         seeds = [s for s in seeds if s["state"] in ("partial", "missing")]
         small = model.startswith("qwen2.5-1.5b")
-        constraint = CARDS_24G if small else CARDS_7B_TURBO if adapter == "tinylora-turbo" else CARDS_40G
+        constraint = (
+            CARDS_24G
+            if small
+            else CARDS_7B_TURBO if adapter == "tinylora-turbo" else CARDS_40G
+        )
 
         def launch(seeds: list[dict], extra: list[str] = []) -> None:
             nonlocal delay
             # HF 429s and node black-holes when many jobs start at once: stagger the starts (chained jobs are spread by their twins)
-            opts = ["-a", ",".join(str(s["seed"]) for s in seeds), f"--comment={cfg_dir}", f"--constraint={constraint}", *clock, *off, *extra]
+            opts = [
+                "-a",
+                ",".join(str(s["seed"]) for s in seeds),
+                f"--comment={cfg_dir}",
+                f"--constraint={constraint}",
+                *clock,
+                *off,
+                *extra,
+            ]
             if delay and not extra:
                 opts.append(f"--begin=now+{delay}seconds")
-            sbatch(dict(MODEL=model, TASK=task, CFG=cfg), [*opts, f"slurm/{SCRIPT[adapter]}.sh"], go)
+            sbatch(
+                dict(MODEL=model, TASK=task, CFG=cfg),
+                [*opts, f"slurm/{SCRIPT[adapter]}.sh"],
+                go,
+            )
             delay += stagger if not extra else 0
 
         # turbo takes its SVD bases from the tinylora-grpo twin's export (written at its first start) and lora_v from a
@@ -232,16 +355,63 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
         if seeds:
             launch(seeds)
     if waiting_on_twin:
-        print(f"{waiting_on_twin} turbo seeds wait for their tinylora-grpo twin's final_adapter")
+        print(
+            f"{waiting_on_twin} turbo seeds wait for their tinylora-grpo twin's final_adapter"
+        )
+    fill_short(go)
+
+
+def fill_short(go: bool) -> None:
+    """Move one pending training seed into the short QOS (1 job per user, 4 h, +1000 priority) whenever it is free."""
+    out = subprocess.run(
+        ["squeue", "--me", "-r", "-h", "-o", "%i %q %T %r %j %k"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    jobs = [line.split() for line in out.splitlines()]
+    if any(qos == "short" for _, qos, *_ in jobs):
+        return
+    pending = [
+        (job, comment)
+        for job, _, state, reason, name, comment in jobs
+        if state == "PENDING"
+        and reason in ("Priority", "Resources")
+        and name in ("train_turbo", "train_tinylora")
+    ]
+    if not pending:
+        return
+    # 1.5B seeds can finish inside 4 h; among them the deep u<=4 b1-t1 seeds the paper is waiting on
+    job, comment = min(
+        pending, key=lambda p: ("qwen2.5-1.5b" not in p[1], "-b1-t1" not in p[1])
+    )
+    print(f"short QOS: {job} ({comment})")
+    if go:
+        subprocess.run(
+            ["scontrol", "update", f"JobId={job}", "QOS=short", "TimeLimit=04:00:00"],
+            check=False,
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command", choices=["status", "submit"])
-    parser.add_argument("--go", action="store_true", help="submit for real (default: print the sbatch lines)")
+    parser.add_argument(
+        "--go",
+        action="store_true",
+        help="submit for real (default: print the sbatch lines)",
+    )
     parser.add_argument("--only", help="regex on <model>/<adapter-loss>/<cfg>")
-    parser.add_argument("--stagger", type=int, default=45, help="seconds between array starts")
-    parser.add_argument("--time", help="sbatch -t for the launched jobs; short slices survive maintenance reservations, the watcher resubmits what times out")
+    parser.add_argument(
+        "--stagger", type=int, default=45, help="seconds between array starts"
+    )
+    parser.add_argument(
+        "--time",
+        help="sbatch -t for the launched jobs; short slices survive maintenance reservations, the watcher resubmits what times out",
+    )
     args = parser.parse_args()
     rows = scan(args.only)
-    status(rows) if args.command == "status" else submit(rows, args.go, args.stagger, args.time)
+    (
+        status(rows)
+        if args.command == "status"
+        else submit(rows, args.go, args.stagger, args.time)
+    )
