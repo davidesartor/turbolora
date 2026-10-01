@@ -1,8 +1,10 @@
 #!/bin/bash -l
 # Requeue watcher: resubmits every seed the sweep is short of, and keeps the single short-QOS train-eval slot
-# filled, until both are done. Usage: [MAX_SLICE_H=24] [MIN_SLICE_H=2] [WATCH_MIN=10] [TRAINEVAL=.] sbatch slurm/watch.sh
+# filled, until both are done. Usage: [MAX_SLICE_H=12] [MIN_SLICE_H=2] [WATCH_MIN=10] [TRAINEVAL=.] sbatch slurm/watch.sh
 # Each pass picks the longest slice that still fits before the next cluster-wide maintenance window; whatever
 # times out comes back as `partial` and this picks it up next pass. Chains a successor before its own wall limit.
+# MAX_SLICE_H trades reload cost against schedulability: a short walltime backfills into gaps a long one cannot fit,
+# but every slice re-pays ~10-20 min of init plus a full queue wait, which dominates once only a few seeds are left.
 #SBATCH -J sweep_watch
 #SBATCH -p cpu
 #SBATCH --requeue
@@ -14,7 +16,7 @@
 set -e
 cd "${SLURM_SUBMIT_DIR:?}"
 UV="$HOME/.local/bin/uv"
-MAX_SLICE_H=${MAX_SLICE_H:-24}
+MAX_SLICE_H=${MAX_SLICE_H:-12}  # each slice re-pays model load and a fresh queue wait, so keep it long while few seeds are left
 MIN_SLICE_H=${MIN_SLICE_H:-2}
 WATCH_MIN=${WATCH_MIN:-10}
 TRAINEVAL=${TRAINEVAL:-.}  # model regex for the train-set eval backlog; '.' = every model
@@ -47,9 +49,15 @@ while :; do
 
     JOB_TIME="$(slice_hours):00:00"
     echo "slice $JOB_TIME"
-    # the counts line is `done=N` alone only when every grid seed is finished
-    if [ -n "$("$UV" run slurm/sweep.py status | tail -1 | sed 's/done=[0-9]*//' | tr -d ' ')" ]; then
-        grid_done=
+    # the counts line is `done=N` alone only when every grid seed is finished; a status that errored says nothing,
+    # so never read it as completion -- that once exited the watcher and left the grid idle for days
+    grid_done=
+    if ! summary=$("$UV" run slurm/sweep.py status); then
+        echo "WARN sweep.py status failed; skipping this pass"
+    elif [ -z "$(echo "$summary" | tail -1 | sed 's/done=[0-9]*//' | tr -d ' ')" ]; then
+        grid_done=1
+        echo "training grid complete"
+    else
         "$UV" run slurm/sweep.py submit --go --time "$JOB_TIME" | tee -a "$submits"
         # a pending seed submitted under a shorter slice than we can now afford would idle until the window: stretch it
         squeue -u "$USER" -h -t PENDING -n train_tinylora,train_turbo,train_lora,train_loraxs -o "%i %l" |
@@ -57,9 +65,6 @@ while :; do
             while read -r j; do scontrol update JobId="$j" TimeLimit="$JOB_TIME" 2>/dev/null || true; done
         # a seed relaunched many times is failing in minutes, not training: flag it, the log line names the cfg and seed
         grep '^MODEL=' "$submits" | sed 's/ --begin=[^ ]*//' | sort | uniq -c | awk '$1 >= 5 {print "WARN relaunched", $1, "times:", $0}'
-    else
-        grid_done=1
-        echo "training grid complete"
     fi
 
     # training has priority: few eval chunks while seeds still need GPUs (they are nice=300, so pending seeds outrank them anyway)
