@@ -9,7 +9,7 @@
 #SBATCH --signal=B:USR1@600
 #SBATCH --gpus=1
 #SBATCH --constraint=l4|a40|l40s|a100-40g|a100-80g|h100
-#SBATCH -c 8
+#SBATCH -c 2  # jobs keep ~1 core busy; 8 left GPUs stranded on CPU-full nodes
 #SBATCH --mem=60G
 #SBATCH -t 24:00:00
 #SBATCH -o .slurm-logs/%x-%A-%a.out

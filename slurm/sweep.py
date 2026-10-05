@@ -15,17 +15,19 @@ from turbolora.models import MODELS
 
 RUNS = Path("outputs/runs")
 IDLE_HOURS = 3  # a running job whose progress file is older than this is stuck (math-verify hang)
-QWEN_U, OTHER_U = (1, 2, 4, 8, 16, 64, 256), (1, 2, 4, 8, 16)
+U = (1, 2, 4, 8, 16, 64, 256)
+TURBO_MAX_U = 16  # turbo u64/u256 left out of the grid since 2026-09-12; GRPO runs every u
 GRID = {  # model -> (train tier, turbo/tinylora u's); ranks and batches are the same everywhere
-    "qwen2.5-1.5b": ("easy", QWEN_U),
-    "qwen2.5-1.5b-instruct": ("easy", QWEN_U),
-    "qwen2.5-1.5b-math": ("easy", QWEN_U),
-    "qwen2.5-7b": ("hard", QWEN_U),
-    "qwen2.5-7b-instruct": ("hard", QWEN_U),
-    "qwen2.5-7b-math": ("hard", QWEN_U),
-    "llama3.1-8b": ("hard", OTHER_U),
-    "mistral-7b": ("hard", OTHER_U),
-    "deepseek-7b-math": ("hard", OTHER_U),
+    "qwen2.5-1.5b": ("easy", U),
+    "qwen2.5-1.5b-instruct": ("easy", U),
+    "qwen2.5-1.5b-math": ("easy", U),
+    "qwen2.5-7b": ("hard", U),
+    "qwen2.5-7b-instruct": ("hard", U),
+    "qwen2.5-7b-math": ("hard", U),
+    "llama3.1-8b": ("hard", U),
+    "mistral-7b": ("hard", U),
+    "deepseek-7b-math": ("hard", U),
+    "deepseek-7b": ("hard", U),
 }
 # distribution-shift check (2026-09-17): the TinyLoRA cells again on a single-source train set, cfg tagged `-<task>`
 EXTRA_TASKS = {
@@ -43,9 +45,8 @@ SCRIPT = {
     "tinylora-grpo": "train_tinylora",
     "tinylora-turbo": "train_turbo",
 }
-CARDS_40G = "l40s|a100-40g|a100-80g|h100"
-CARDS_24G = "l4|a40|" + CARDS_40G
-CARDS_7B_TURBO = "a40|" + CARDS_40G  # 7B turbo on an L4 takes ~18 min/trial
+CARDS_40G = "a40|l40s|a100-40g|a100-80g|h100"  # 7B GRPO and turbo (turbo on an L4 takes ~18 min/trial)
+CARDS_24G = "l4|" + CARDS_40G
 EVAL_TASKS = (
     "gsm8k",
     "math500",
@@ -61,7 +62,8 @@ def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
 
     A `tag` (a non-default train set) names TinyLoRA-only cells `<cfg>-<tag>`.
     """
-    turbo = [f"r2-u{u}-b{b}{tag}" for u in us for b in (1, 4)]
+    turbo_us = tuple(u for u in us if u <= TURBO_MAX_U)
+    turbo = [f"r2-u{u}-b{b}{tag}" for u in turbo_us for b in (1, 4)]
     deep = lambda u: DEEP_SEEDS if u in DEEP_US else 3
     return (
         []
@@ -70,8 +72,8 @@ def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
         + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
     ) + (
         [("tinylora-grpo", f"r2-u{u}{tag}", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", deep(u)) for u in us]
+        + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", deep(u)) for u in turbo_us]
+        + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", deep(u)) for u in turbo_us]
         + [("tinylora-turbo", cfg, 3) for cfg in turbo]
     )
 
@@ -311,11 +313,7 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
     ).items():
         seeds = [s for s in seeds if s["state"] in ("partial", "missing")]
         small = model.startswith("qwen2.5-1.5b")
-        constraint = (
-            CARDS_24G
-            if small
-            else CARDS_7B_TURBO if adapter == "tinylora-turbo" else CARDS_40G
-        )
+        constraint = CARDS_24G if small else CARDS_40G
 
         def launch(seeds: list[dict], extra: list[str] = []) -> None:
             nonlocal delay
