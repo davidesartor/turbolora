@@ -1,4 +1,4 @@
-"""Fixed-noise GP, denoised pick and search arguments shared by turbo.search (after collaborators-poc)."""
+"""Fixed-noise GP, denoised pick and search arguments shared by turbo.search."""
 
 import argparse
 import math
@@ -57,7 +57,7 @@ def fit_gp(trials: list[dict], bounds: Float[Tensor, "2 D"] | None = None, regio
 
 
 def argument_parser() -> argparse.ArgumentParser:
-    """Search arguments (defaults = collaborators' pipeline_config.sh); the objective's own get added on top."""
+    """Search arguments; the objective's own get added on top."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(

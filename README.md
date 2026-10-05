@@ -1,142 +1,121 @@
-# TurboLoRA
+# LlMBO
 
-Boosting TinyLoRA with Bayesian optimization: when an adapter has only a handful of trainable scalars, gradient-free search over them can replace RL.
+Code for the experiments: TinyLoRA adapters on math reasoning, trained either by GRPO or by LlMBO, gradient-free
+Bayesian optimization (TuRBO-1) over their few trainable scalars, with LoRA and LoRA-XS as GRPO baselines.
 
-Everything targets math reasoning (SimpleRL-Zoo training tiers, GSM8K / MATH-style evals graded with `math-verify`) on Unity HPC.
+In the code LlMBO is the `turbo` path (`turbo.py`, `train_turbolora.py`, `slurm/train_turbo.sh`, run dirs
+`tinylora-turbo`), and the Python package is `turbolora`.
 
-## Adapters (`src/turbolora/adapters.py`)
+## Setup
 
-| name | trainable per module | ΔW |
+Requirements: Linux x86_64, Python 3.12, [uv](https://docs.astral.sh/uv/), one CUDA GPU per run
+(≥24 GB for 1.5B models, ≥48 GB for 7–8B), ~60 GB host RAM. `uv.lock` pins every dependency:
+
+```bash
+uv sync
+uv run pytest        # CPU-only unit tests (unsloth is stubbed)
+```
+
+Models and data come from the Hugging Face Hub (Llama and Mistral are gated: accept their licenses and
+`uv run hf auth login`). The SLURM scripts run offline against `HF_HOME=.hf-cache`, so fill the cache once on a
+machine with network access:
+
+```bash
+export HF_HOME=$PWD/.hf-cache
+uv run python -c "from turbolora.tasks import TASKS; [TASKS[t]('train') for t in ('easy', 'hard')]; [TASKS[t]() for t in ('gsm8k', 'math500', 'aime24', 'amc23', 'minerva', 'olympiad')]"
+uv run hf download Qwen/Qwen2.5-7B   # once per model; HF ids in src/turbolora/models.py
+```
+
+The SLURM headers (`-p`, `--constraint`, `module load cuda/...`) need adapting to your cluster.
+
+## Code structure
+
+```
+src/turbolora/
+  models.py           MODELS: short name -> HF id + raw-text prompt style (SimpleRL-Zoo prompts)
+  tasks.py            TASKS: SimpleRL-Zoo training tiers (easy/medium/hard), single-source gsm8k/math train sets,
+                      eval benchmarks gsm8k/math500/aime24/amc23/minerva/olympiad; answer extraction, grading (math-verify), reward
+  adapters.py         lora / loraxs / tinylora attach and export as a standard PEFT LoRA dir (vLLM loads it unchanged)
+  grpo.py             shared GRPO trainer (Unsloth + TRL, colocated vLLM rollouts), checkpoint/resume, snapshot evals
+  train_lora.py       GRPO entry points, one per adapter
+  train_loraxs.py
+  train_tinylora.py
+  bo.py               fixed-noise GP on logit pass rates, trial log, posterior-mean pick
+  turbo.py            TuRBO-1 trust-region search on bo.py's GP
+  train_bo.py         BO objective: pass rate of a TinyLoRA θ on a random train subset, scored with vLLM
+  train_turbolora.py  LlMBO entry point
+  eval.py             vLLM eval of a base model or trained adapter (greedy, or --samples K at T=1)
+slurm/
+  train_{lora,loraxs,tinylora,turbo}.sh   one 3-seed array job per adapter config
+  eval_{baseline,tasks,train}.sh          standalone evals (training already evals every snapshot)
+  sweep.py                                status / submission of the full grid below
+  watch.sh                                optional watcher that resubmits unfinished seeds
+dashboard/            local results browser (uv run dashboard/serve.py)
+tests/
+```
+
+Adapters (`--rank r`, TinyLoRA `--proj-dim u`), with ΔW per adapted projection and trainable parameter count:
+
+| adapter | ΔW | trainable params |
 |---|---|---|
-| `lora` | A, B (rank r) | BA |
-| `loraxs` | R ∈ ℝ^{r×r} | UΣ R Vᵀ (frozen truncated SVD) |
-| `tinylora` | v ∈ ℝᵘ, one global v (default) or one per module (`--untie`) | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ; trained by GRPO (`train_tinylora`) or TuRBO (`train_turbolora`) |
+| `lora` | BA, rank r | Σ r (d_in + d_out) |
+| `loraxs` | UΣ R Vᵀ, R ∈ ℝ^{r×r}, frozen truncated SVD of W | r² per module |
+| `tinylora` | UΣ (Σᵢ vᵢPᵢ) Vᵀ, fixed random Pᵢ, v ∈ ℝᵘ | u, one v shared by all modules (`--untie`: one per module) |
 
-All of them export as a standard PEFT LoRA dir so vLLM can eval them unchanged. The frozen SVD bases are recomputed at every (re)start and their signs pinned to the existing export (`lora_B`), so resumes and turbo twins stay in the same space.
+Every hyperparameter default in the entry points' argparse is the setting used in the experiments; each run
+records its resolved config in `run.json`.
 
-### Parameter budget
+## Reproducing the experiments
 
-With `n` layers x 7 adapted projections (Qwen2.5-7B: 28 x 7 = 196 modules), every adapter is swept with `--rank`:
+```bash
+# untrained baselines, at the same 1024-token budget as every trained eval (greedy, then 4 samples at T=1)
+uv run -m turbolora.eval --model qwen2.5-7b --tasks gsm8k math500 aime24 amc23 minerva olympiad --max-tokens 1024
+uv run -m turbolora.eval --model qwen2.5-7b --tasks gsm8k math500 aime24 amc23 minerva olympiad --max-tokens 1024 --samples 4
 
-| adapter | trainable params | notes |
-|---|---|---|
-| `lora` | Σ r (d_in + d_out) — ~1.3M at r=1 on Qwen2.5-7B, can't go lower | alpha = 2r |
-| `loraxs` | 196 r² — 784 at r=2 | R ∈ ℝ^{r×r} per module |
-| `tinylora` | r² tied (default), 196 r² with `--untie` | `--proj-dim` defaults to r² (full R basis) |
+# GRPO, seeds 0-2 as an array; CFG names the run dir and sets the adapter size
+MODEL=qwen2.5-7b TASK=hard CFG=r32 sbatch slurm/train_lora.sh         # --rank 32
+MODEL=qwen2.5-7b TASK=hard CFG=r8 sbatch slurm/train_loraxs.sh        # --rank 8
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8 sbatch slurm/train_tinylora.sh   # --rank 2 --proj-dim 8
 
-TinyLoRA with u = r² is LoRA-XS with a random basis for R, so `--untie` matches LoRA-XS's count; the default
-shares one v across the whole network and the count is just r²: r=1 → 1, r=2 → 4, r=8 → 64, r=32 → 1024.
-The paper's 13-parameter config is `--rank 2 --proj-dim 13` (u > r² is only meaningful with tying).
+# LlMBO on the same TinyLoRA space: CFG=r<rank>-u<u>-b<batch>[-t1]; needs the tinylora-grpo run with the same
+# model/u/seed (its export fixes the SVD bases); default objective = greedy pass rate, -t1 = sampled at T=1
+MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b1-t1 sbatch slurm/train_turbo.sh
 
-## Training (`grpo.py`)
+# the full grid: coverage table, then the missing sbatch lines (dry run; --go submits)
+uv run slurm/sweep.py status
+uv run slurm/sweep.py submit [--go]
+```
 
-TinyLoRA-paper recipe: 64 problems x 4 rollouts per optimizer step, 3 epochs, no KL, clip 0.2, constant LR with
-10 warmup steps, AdamW-8bit, completions capped at 1024 tokens (`--max-completion`). Rollouts come from a
-colocated vLLM (~50% of VRAM); the base and adapter are kept in bf16. Prompts longer than 512 tokens are dropped
-because the colocated vLLM path never truncates them.
+Grid run by `sweep.py` (`tinylora` is always r=2 with one tied v; b = LlMBO `--batch`):
 
-### Learning rates
-
-`lora` defaults to 5e-6: the optimal LoRA LR is ~10x the full-FT LR of the same task in both SFT and RL
-([LoRA Without Regret](https://thinkingmachines.ai/blog/lora/)), and SimpleRL-Zoo trains full-FT at 5e-7.
-
-`loraxs`/`tinylora` default to an equal-update-norm rule: Adam moves every parameter ~lr per step, so the
-first-step norm is ‖ΔR‖ ≈ lr·r (LoRA-XS, unit basis) or lr·r·√u (TinyLoRA, ‖Pᵢ‖ ≈ r), and the default sets it
-to 1e-3 for every config — `lr = 1e-3 / (r·√u)` (`R_STEP_NORM` in `grpo.py`, `--lr` overrides). Since these
-adapters share the same frozen U, Σ, Vᵀ, equal ‖ΔR‖ is equal weight-space speed.
-
-### TuRBO (`train_turbolora.py`)
-
-Searches TinyLoRA's θ (every v concatenated) with TuRBO-1 on a fixed-noise GP over logit pass rates; the
-objective is the vLLM pass rate on a random train subset of `--batch` prompts, greedy by default or sampled at
-T=1 exactly like GRPO's rollouts with `--no-greedy`. Takes its SVD bases from the matching `tinylora-grpo`
-export (`--bases`). Resumes from `trials.json`.
-
-## Sweep grid (`slurm/sweep.py`)
-
-| models | task | `lora` r | `loraxs` r | `tinylora-grpo` u | `tinylora-turbo` u |
+| models | train tier | `lora` r | `loraxs` r | `tinylora` GRPO u | `tinylora` LlMBO u |
 |---|---|---|---|---|---|
 | Qwen2.5-1.5B, -Instruct, -Math | easy | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 8, 16, 64, 256 | 1, 2, 4, 8, 16, 64, 256 x b1, b4 |
 | Qwen2.5-7B, -Instruct, -Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 8, 16, 64, 256 | 1, 2, 4, 8, 16, 64, 256 x b1, b4 |
 | Llama-3.1-8B, Mistral-7B, DeepSeek-7B-Math | hard | 1, 2, 8, 32 | 1, 2, 8, 32 | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 x b1, b4 |
 
-`tinylora` is always r=2 tied; b in the turbo column is `--batch`. Every turbo cell also has a `-t1` twin
-(`--no-greedy`). Seeds 0-2 everywhere, 0-7 for `tinylora-grpo` u ∈ {1,2,4} and their b4 `-t1` twins.
+Every LlMBO cell runs with both objectives (greedy and `-t1`). Seeds 0-2 everywhere, 0-7 for `tinylora` GRPO
+u ∈ {1, 2, 4} and their b4 `-t1` LlMBO twins.
 
-## Layout
+Jobs are preemptible: training checkpoints on SIGTERM/SIGUSR1 and resumes from the last checkpoint (LlMBO from
+`trials.json`) when requeued.
 
-```
-src/turbolora/
-  models.py          MODELS: HF id + raw-text prompt style (Qwen2.5, Llama 3, Mistral/Ministral, DeepSeek)
-  tasks.py           TASKS: SimpleRL-Zoo tiers (easy/medium/hard) plus single-source gsm8k/math (GSM8K train, full MATH train) for training, gsm8k/math500/aime24/amc23/minerva/olympiad for eval; extract/grade/reward
-  adapters.py        adapter attach/export
-  grpo.py            shared GRPO/GSPO trainer (Unsloth + TRL), preempt-safe checkpoints
-  train_{lora,loraxs,tinylora}.py   GRPO entry points
-  bo.py              fixed-noise GP on logit pass rates, trial log, posterior-mean pick
-  turbo.py           TuRBO-1 trust-region search on bo.py's GP
-  train_bo.py        search objective (TinyLoRA θ; `--untie` for one v per module): vLLM pass rate on a random train subset
-  train_turbolora.py TuRBO entry point (slurm/train_turbo.sh)
-  eval.py            vLLM eval of a base model or a trained adapter (greedy, or --samples K at T=1)
-slurm/               one seed-array job per adapter (train_{lora,loraxs,tinylora,turbo}.sh) + eval_{baseline,tasks,train}.sh;
-                     sweep.py = grid status/submit
-dashboard/           uv run dashboard/serve.py -> live dashboard at localhost:8000 (baselines, runs, curves)
-                     uv run dashboard/build.py -> standalone dashboard.html snapshot to share
-tests/
-collaborators-poc/   original proof-of-concept BO pipeline (kept for reference)
-```
+## Outputs
 
-### Outputs (gitignored)
+Runs land in `outputs/runs/<family>/<model>/<adapter>-<method>/<cfg>/seed<N>/`; untrained baselines in
+`outputs/runs/<family>/<model>/base/`.
 
-Evals land in an `eval@K/` dir (K=1 greedy, K=4 sampled) holding the `<task>.json.gz` completion sets and a
-`summary.json`. The untrained model is the `base` adapter: `outputs/runs/<family>/<model>/base/eval@K/`.
-
-Training runs are `outputs/runs/<family>/<model>/<adapter>-<loss>/<cfg>[-lr<lr>]/seed<N>/` with:
-
-- `run.json` — resolved config (incl. the train set), stamped with `steps` when the run finishes
-- `curves.jsonl` — per-step training metrics, rewritten every step
-- `checkpoint-*/` — every 25 steps, for resume
-- `final_adapter/` — PEFT export written at startup and refreshed at every snapshot (so a resumed run rebuilds the same SVD bases)
-- `snapshots/step-N/` at steps 1, 2, 4, … and the last: `trainable.safetensors` plus `eval@1/`; the last snapshot also gets `eval@4/`
-
-Turbo runs add `trials.json` (the BO log) in place of checkpoints.
-
-## Usage
-
-```bash
-# baseline eval of an untrained model
-MODEL=qwen2.5-7b TASKS="gsm8k math500" sbatch slurm/eval_baseline.sh
-
-# GRPO, one script per adapter, 3 seeds (array 0-2); CFG names the run dir and is parsed into the adapter's args
-MODEL=qwen2.5-7b TASK=hard CFG=r32 sbatch slurm/train_lora.sh              # lora-grpo/r32,          --rank 32
-MODEL=qwen2.5-7b TASK=hard CFG=r8 sbatch -a 0 slurm/train_loraxs.sh        # loraxs-grpo/r8 seed 0,  --rank 8
-MODEL=qwen2.5-7b TASK=hard CFG=r2-u8 sbatch slurm/train_tinylora.sh        # tinylora-grpo/r2-u8,    --rank 2 --proj-dim 8
-MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-notie sbatch slurm/train_tinylora.sh --untie   # extra args pass through; the cfg tail is free
-MODEL=qwen2.5-7b TASK=math CFG=r2-u8-math sbatch slurm/train_tinylora.sh           # single-source train set (gsm8k | math); run dirs don't carry the task, so tag the cfg
-
-# TuRBO twins (need the tinylora-grpo run with the same model/u/seed): r<rank>-u<u>-b<batch>[-t1], -t1 = sampled (GRPO T=1) objective
-MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b4 sbatch slurm/train_turbo.sh
-MODEL=qwen2.5-7b TASK=hard CFG=r2-u8-b4-t1 sbatch slurm/train_turbo.sh
-
-# the whole grid: coverage table, then submit whatever is short (dry-run prints the sbatch lines; --go submits)
-uv run slurm/sweep.py status
-uv run slurm/sweep.py submit [--go] [--only 'mistral-7b/tinylora-turbo']
-
-# eval a snapshot (training already evals every snapshot; this is for backfills / extra tasks)
-ADAPTERS=outputs/runs/qwen2.5/qwen2.5-7b/tinylora-grpo/r2-u64/seed0/snapshots/step-000393 TASKS="gsm8k math500" sbatch slurm/eval_tasks.sh
-SAMPLES=4 ADAPTERS=... sbatch slurm/eval_tasks.sh   # sampled eval@4 (T=1) instead of greedy eval@1
-TASK=hard ADAPTERS=... sbatch slurm/eval_train.sh   # greedy on the run's own train tier at the training budget (1024 tokens) -> eval@1/hard-train.json.gz
-
-# locally / interactively
-uv run -m turbolora.train_tinylora --model qwen2.5-7b --task hard --out outputs/runs/x --max-steps 3
-uv run -m turbolora.eval --model qwen2.5-7b --tasks gsm8k
-uv run pytest
-```
-
-Jobs run on `gpu-preempt` with requeue; training checkpoints on SIGTERM/SIGUSR1 and resumes from the last checkpoint (BO resumes from `trials.json`). `--qos=short` evals allow one queued job per user, so submit them one at a time. `HF_HOME` points at `.hf-cache/`; nothing is written outside the repo.
+- `run.json`: resolved config, stamped with `steps` when the run finishes
+- `curves.jsonl`: per-step training metrics
+- `trials.json` (LlMBO): every evaluated θ and its pass rate
+- `final_adapter/`: PEFT LoRA export of the final adapter
+- `snapshots/step-N/` at steps 1, 2, 4, … and the last: `trainable.safetensors` and `eval@1/` (greedy); the last
+  snapshot also has `eval@4/` (4 samples at T=1)
+- `eval@K/<task>.json.gz` holds every completion and its grade, `eval@K/summary.json` per-task `accuracy` (mean over all K completions) and, for K>1, `pass_any` (pass@K)
 
 ## References
 
 - TinyLoRA: arXiv 2602.04118
 - LoRA-XS: arXiv 2405.17604
 - SimpleRL-Zoo data tiers and prompts: arXiv 2503.18892
-- LoRA Without Regret (LoRA LR = 10x full-FT): https://thinkingmachines.ai/blog/lora/
+- TuRBO: arXiv 1910.01739
