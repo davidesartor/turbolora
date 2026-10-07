@@ -60,8 +60,9 @@ while :; do
     else
         "$UV" run slurm/sweep.py submit --go --time "$JOB_TIME" | tee -a "$submits"
         # a pending seed submitted under a shorter slice than we can now afford would idle until the window: stretch it
-        squeue -u "$USER" -h -t PENDING -n train_tinylora,train_turbo,train_lora,train_loraxs -o "%i %l" |
-            awk -v want="$JOB_TIME" '$2 != want && $2 !~ /-/ {print $1}' |
+        # (never the short-QOS seed: past its 4 h cap it pends forever on QOSMaxWallDurationPerJobLimit)
+        squeue -u "$USER" -h -t PENDING -n train_tinylora,train_turbo,train_lora,train_loraxs -o "%i %l %q" |
+            awk -v want="$JOB_TIME" '$2 != want && $2 !~ /-/ && $3 != "short" {print $1}' |
             while read -r j; do scontrol update JobId="$j" TimeLimit="$JOB_TIME" 2>/dev/null || true; done
         # a seed relaunched many times is failing in minutes, not training: flag it, the log line names the cfg and seed
         grep '^MODEL=' "$submits" | sed 's/ --begin=[^ ]*//' | sort | uniq -c | awk '$1 >= 5 {print "WARN relaunched", $1, "times:", $0}'

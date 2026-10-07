@@ -34,11 +34,8 @@ EXTRA_TASKS = {
     m: ("math", (1, 2, 4, 8, 16))
     for m in ("qwen2.5-1.5b", "qwen2.5-1.5b-math", "qwen2.5-7b", "qwen2.5-7b-math")
 }
-DEEP_SEEDS, DEEP_US = 8, (
-    1,
-    2,
-    4,
-)  # tinylora-grpo r2-u{1,2,4} and their noisy turbo b4-t1 (2026-09-15) and b1-t1 (2026-10-01) twins get seeds 0-7, the rest 0-2
+DEEP_SEEDS, DEEP_US, DEEP_B4_US = 8, (1, 2, 4, 8), (1, 2, 4)
+# tinylora-grpo r2-u{1,2,4,8} and their noisy turbo b1-t1 twins (2026-10-01, u8 since 2026-10-07) get seeds 0-7, b4-t1 (2026-09-15) only u{1,2,4}; the rest 0-2
 SCRIPT = {
     "lora-grpo": "train_lora",
     "loraxs-grpo": "train_loraxs",
@@ -72,7 +69,7 @@ def cells(us: tuple[int, ...], tag: str = "") -> list[tuple[str, str, int]]:
         + [("loraxs-grpo", f"r{r}", 3) for r in (1, 2, 8, 32)]
     ) + (
         [("tinylora-grpo", f"r2-u{u}{tag}", deep(u)) for u in us]
-        + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", deep(u)) for u in turbo_us]
+        + [("tinylora-turbo", f"r2-u{u}-b4-t1{tag}", DEEP_SEEDS if u in DEEP_B4_US else 3) for u in turbo_us]
         + [("tinylora-turbo", f"r2-u{u}-b1-t1{tag}", deep(u)) for u in turbo_us]
         + [("tinylora-turbo", cfg, 3) for cfg in turbo]
     )
@@ -314,6 +311,9 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
         seeds = [s for s in seeds if s["state"] in ("partial", "missing")]
         small = model.startswith("qwen2.5-1.5b")
         constraint = CARDS_24G if small else CARDS_40G
+        # u>16 is the large-u tail, not the headline: let every other job go first
+        u = re.search(r"-u(\d+)", cfg)
+        last = ["--nice=1000"] if u and int(u[1]) > 16 else []
 
         def launch(seeds: list[dict], extra: list[str] = []) -> None:
             nonlocal delay
@@ -325,6 +325,7 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
                 f"--constraint={constraint}",
                 *clock,
                 *off,
+                *last,
                 *extra,
             ]
             if delay and not extra:
@@ -362,19 +363,25 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
 def fill_short(go: bool) -> None:
     """Move one pending training seed into the short QOS (1 job per user, 4 h, +1000 priority) whenever it is free."""
     out = subprocess.run(
-        ["squeue", "--me", "-r", "-h", "-o", "%i %q %T %r %j %k"],
+        ["squeue", "--me", "-r", "-h", "-o", "%i %q %T %r %j %y %k"],
         capture_output=True,
         text=True,
     ).stdout
     jobs = [line.split() for line in out.splitlines()]
-    if any(qos == "short" for _, qos, *_ in jobs):
+    short = [(job, reason) for job, qos, _, reason, *_ in jobs if qos == "short"]
+    # a watcher stretch past the 4 h cap leaves the short seed pending forever and the slot blocked
+    for job, reason in short:
+        if reason == "QOSMaxWallDurationPerJobLimit" and go:
+            subprocess.run(["scontrol", "update", f"JobId={job}", "TimeLimit=04:00:00"], check=False)
+    if short:
         return
     pending = [
         (job, comment)
-        for job, _, state, reason, name, comment in jobs
+        for job, _, state, reason, name, nice, comment in jobs
         if state == "PENDING"
         and reason in ("Priority", "Resources")
         and name in ("train_turbo", "train_tinylora")
+        and nice == "0"  # niced seeds (u>16) run last, never jump the queue
     ]
     if not pending:
         return
