@@ -1,0 +1,943 @@
+\documentclass[twoside]{article}
+\usepackage{aistats2027}
+\usepackage[round]{natbib}
+\renewcommand{\bibname}{References}
+\renewcommand{\bibsection}{\subsubsection*{\bibname}}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{tikz}
+\usepackage{pifont}
+
+\newcommand{\gapchip}[2]{\tikz[baseline=(c.base)]\node(c)[fill=#1,text=black,rounded corners=4pt,inner xsep=2pt,inner ysep=0.3pt,minimum width=4.6em]{#2};}
+\newcommand{\gapdot}[2]{\tikz[baseline=(c.base)]\node(c)[fill=#1,text=black,rounded corners=3pt,inner xsep=1.5pt,inner ysep=0.3pt,minimum width=2.6em]{#2};}
+\newcommand{\fitdot}[2]{\tikz[baseline=(c.base)]\node(c)[fill=#1,text=black,rounded corners=3pt,inner xsep=1.5pt,inner ysep=0.3pt,minimum width=2.1em]{#2};} 
+\usepackage{placeins}\usepackage{stfloats} % table* at [b]
+\usepackage{pifont}
+% pack floats with text and top-align float-only pages
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\renewcommand{\dbltopfraction}{0.9}
+\renewcommand{\dblfloatpagefraction}{0.8}
+\setcounter{dbltopnumber}{3}
+\makeatletter\setlength{\@fptop}{0pt}\setlength{\@dblfptop}{0pt}\makeatother
+% tighter gaps around floats and captions
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}\setlength{\dbltextfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}\setlength{\dblfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}\setlength{\belowcaptionskip}{0pt}
+\input{results/numbers.tex}
+\input{results/numbers_snr.tex}
+
+\newcommand{\mcN}{\mathcal{N}}
+\newcommand{\mcD}{\mathcal{D}}
+\newcommand{\mbR}{\mathbb{R}}
+\newcommand{\mbE}{\mathbb{E}}
+\newcommand{\llmbo}{LlMBO}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+\definecolor{limboGreenText}{RGB}{35,105,55}
+\definecolor{bothGray}{RGB}{247,247,247}
+
+\begin{document}
+
+\twocolumn[
+\aistatstitle{How Low Can You Go: Fine-Tuning LLMs \\with Bayesian Optimization (\llmbo{})}
+\aistatsauthor{Anonymous Author(s)}
+\aistatsaddress{Anonymous Institution}
+]
+
+\begin{abstract}
+Recently, Morris et al. introduced TinyLoRA, a strategy for LLM fine-tuning which introduces arbitrarily few parameters, and demonstrated accuracy improvements using less than $10$ parameters rather than the ${\gtrsim 10,000}$ typically demanded by LoRA-based methods.
+However, that study continued to use gradient-based local search methods of the kind deployed for training multi-billion parameter LLMs in the first place.
+This article is predicated on the observation that, in the low dimensional setting, global optimization methods become tractable, unlocking Large language Model Bayesian Optimization (\llmbo{}).
+\llmbo{} is sample-efficient, gradient-free, memory-light, parallelizes across devices without synchronization, and, unlike policy-gradient methods, can optimize greedy-decoding accuracy directly.
+%In this work we compare \llmbo{} against GRPO on the same TinyLoRA adapter configurations and the same training data (Hendrycks MATH and GSM8K), tracing how each approach scales from a few thousand parameters down to a single one.
+We describe numerical experiments comparing \llmbo{} against GRPO on fine-tuning tasks for a variety of models on a math benchmark suite which show that \llmbo{} can be a suitable alternative in this regime, matching or exceeding GRPO's fine tuning gains, while using a fraction of the compute and memory.
+%\vspace{2em}
+%% old:
+%Recent work shows that fine-tuning of language models for reasoning can be achieved with surprisingly small adapters.
+%With a combination of parameter tying across layers and exploring randomized subspaces in SVD, the number of free parameters can be pushed to just a handful, while retaining much of the gains of full fine tuning.
+%This ultra-low parameter scale opens up the fine tuning objective to other optimization methods, beyond gradient-based reinforcement learning.
+%Specifically, we introduce Large Language Model Bayesian Optimization (\llmbo{}), replacing GRPO with trust-region Bayesian optimization over the adapter parameters.
+%\llmbo{} is sample efficient, gradient-free and memory-light, parallelizes across devices without synchronization, and, unlike policy-gradient methods, can optimize greedy-decoding accuracy directly.
+%In this work we compare \llmbo{} against GRPO on the same TinyLoRA adapter configurations and the same training data (Hendrycks MATH and GSM8K), tracing how each approach scales from a few thousand parameters down to a single one.
+%The comparison covers Qwen2.5, Llama 3, Mistral, DeepSeek families of models, across base, instruct, and math variants of various sizes.
+%We evaluate the performance on a broad math reasoning benchmark suite, evaluated under the same harness across models.
+%We show that \llmbo{} is a suitable alternative in this regime, matching or exceeding GRPO's fine tuning gains, while using a fraction of the compute and memory.
+\end{abstract}
+
+
+\section{Introduction}\label{sec:intro}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{results/fig_headline.pdf}
+\caption{\llmbo{} against GRPO, evaluated both in terms of mean performance at temperature 1 on 4 trials (avg@4, open points)
+and via greedy decoding (filled).
+%, \llmbo{} trained on the metric of each point and the same GRPO runs evaluated both ways.
+Gain over the base model (mean $\pm$ s.e. over seeds) for runs with $u\leq8$ trainable parameters (marker) and model family (color).
+%and each 7-8B model family (color; Qwen2.5-7B averages the base and Math models, each counted once).
+%each \llmbo{} run paired with the GRPO run that shares its SVD bases and random projections (same seed).
+%Points in the shaded half above the diagonal favor \llmbo{}; dashed lines indicate no gain.
+}
+\label{fig:headline}
+\end{figure}
+Reinforcement learning with verifiable rewards has become the standard recipe for teaching language models to reason. In this setting, we sample solutions to problems with checkable answers, reward the correct ones, and follow the policy gradient \citep{shao2024deepseekmath,zeng2025simplerl}.
+Recent work shows how little of the network this recipe has to change:
+TinyLoRA \citep{morris2026learning} expresses each weight update in a random subspace of the weight's own top singular vectors and ties the coefficients across all layers; with only a handful of trainable parameters, even down to a single one, it retains much of the gain of full fine-tuning.
+
+This ultra-low parameter scale opens the fine-tuning objective to optimizers other than gradient-based reinforcement learning.
+An optimization problem with a handful of variables and an expensive, noisy, black-box objective is the textbook setting for Bayesian optimization \citep[BO,][]{garnett_bayesoptbook_2023}.
+Seen from that perspective, a policy gradient is a heavy tool for TinyLoRA. To update just a few scalars, Group Relative Policy Optimization (GRPO) rescores every rollout, backpropagates through billions of weights and holds the optimizer state.
+Further, it also constrains the objective.
+GRPO requires sampled rollouts, so it optimizes accuracy at the sampling temperature, while the deployed model is often decoded greedily.
+
+We introduce Large language Model Bayesian Optimization (\llmbo{}), replacing GRPO with trust-region BO \citep[TuRBO,][]{eriksson2019turbo} over the adapter parameters.
+Each candidate adapter is loaded into an inference engine and scored by the fraction of a random batch of training problems it solves. A Gaussian process (GP) on the logit of that pass rate proposes the subsequent batch of candidates. %This makes \llmbo{} sample efficient, since the GP pools every evaluation; gradient-free and memory-light, since scoring is inference only; parallel across devices with almost no synchronization, since a candidate is $u$ numbers and its score a pass count; and free in its decoding rule, so that, unlike a policy gradient, it can optimize greedy-decoding accuracy directly.
+\llmbo{} is thus 1. \textit{sample efficient}, since the GP pools every evaluation, 2. \textit{gradient-free and memory-light}, since scoring is inference only, 3. \textit{parallelizable} across devices with minimal synchronization, since a candidate is $u$ independent numbers and its score is a pass count, and 4. free in its decoding rule, so that, unlike a policy gradient, it can optimize greedy-decoding accuracy directly.
+
+We compare \llmbo{} against GRPO on the same TinyLoRA adapter configurations, with the same SVD bases and random projections seed for seed, the same training data (Hendrycks MATH \citep{hendrycks2021math} and GSM8K \citep{cobbe2021gsm8k}) and a matched number of generated completions. We trace how each approach scales as the adapter shrinks to a single parameter with LoRA and LoRA-XS under GRPO as references at larger scales. The comparison covers \nModels{} models of the Qwen2.5, Llama 3, Mistral and DeepSeek families, in base, instruct and math variants from 1.5B to 8B parameters, comprising \nRuns{} training runs in all, evaluated on 6 math reasoning benchmarks under a common harness.
+Our contributions are:
+\begin{itemize}
+    \item \llmbo{}, a gradient-free fine-tuning method for ultra-low-parameter adapters, with a moment-matched logit observation model for pass rates, a dimension-scaled lengthscale prior inside the trust region, and a search box set by how far GRPO could move each parameter (Section~\ref{sec:method}).
+    %\item Evidence that \llmbo{}, on GRPO's own objective and metric (the pass rate at $T = 1$, evaluated as avg@4), matches or exceeds GRPO's fine-tuning gains at $u \le 4$ trainable parameters, reported per model group: one 7-8B base model per family (Section~\ref{sec:base}), the math-specialized models (Section~\ref{sec:math}) and the Qwen2.5 Instruct and 1.5B models (Section~\ref{sec:instruct-small}). \llmbo{} leads GRPO on the Qwen2.5 7B base and Math models (Qwen2.5-7B GSM8K: \gainToneMeanQwenUTwoGsm{} vs.\ \gainGrpoMeanQwenUTwoGsm{} points at $u{=}2$; Qwen2.5-Math-7B MATH-500: \gainToneMeanMathUFourMathFive{} vs.\ \gainGrpoMeanMathUFourMathFive{} at $u{=}4$), is level elsewhere, leads pooled over the 7-8B models (MATH-500: \poolToneMeanUTwoMathFive{} points at $u{=}2$), and keeps its lead when the models train on MATH alone.
+    %-
+    %\item Evidence that \llmbo{} exceeds or matches GRPO's fine-tuning gains at $u \le 4$ trainable parameters on GRPO's own objective and metric (the pass rate at $T = 1$, evaluated as avg@4). This is reported per model group one 7-8B base model per family, the math-specialized models and the Qwen2.5 1.5B models (Section~\ref{sec:results}, Appendix~\ref{app:results}; the Instruct models in Appendix~\ref{app:instruct}). \llmbo{} leads GRPO on the Qwen2.5 7B base and Math models (Qwen2.5-7B GSM8K: \gainToneMeanQwenUTwoGsm{} vs.\ \gainGrpoMeanQwenUTwoGsm{} points at $u{=}2$; Qwen2.5-Math-7B MATH-500: \gainToneMeanMathUFourMathFive{} vs.\ \gainGrpoMeanMathUFourMathFive{} at $u{=}4$), is level elsewhere, leads pooled over the 7-8B models (MATH-500: \poolToneMeanUTwoMathFive{} points at $u{=}2$), and keeps its lead when the models train on MATH alone.
+    \item Evidence that \llmbo{} matches or exceeds GRPO's fine-tuning gains at $u \le 4$ trainable parameters on GRPO's own objective and metric. This is reported per model group, with one 7-8B base model per family, the math-specialized models and the Qwen2.5 1.5B models (Section~\ref{sec:results}, Appendix~\ref{app:results}; the Instruct models in Appendix~\ref{app:instruct}). \llmbo{} leads GRPO on the Qwen2.5 7B base and Math models, is level elsewhere, leads pooled over the 7-8B models, and keeps its lead when the models train on MATH alone.
+    %-
+    %\item Training directly on greedy-decoding accuracy, an achievement which a policy gradient cannot achieve (Section~\ref{sec:greedy-objective}). Trained and evaluated greedily, \llmbo{} leads GRPO on greedy GSM8K at every $u \le 4$ in every model group and is level or ahead on MATH-500. This is most clear on the math-specialized models (Qwen2.5-Math-7B GSM8K: \gainGreedyGreedyMathUFourGsm{} vs.\ \gainGrpoGreedyMathUFourGsm{} points at $u{=}4$; Qwen2.5-Math-1.5B: \gainGreedyGreedyMathSmallUTwoGsm{} vs.\ \gainGrpoGreedyMathSmallUTwoGsm{} at $u{=}2$). Seed for seed, training on greedy accuracy rather than on the pass rate at $T = 1$ raises greedy accuracy, which makes the decoding rule a free choice of objective.
+    %-
+    \item Training directly on greedy-decoding accuracy, which policy gradient cannot achieve (Section~\ref{sec:greedy-objective}). Trained and evaluated greedily, \llmbo{} leads GRPO on greedy GSM8K at every $u \le 4$ in every model group and is level or ahead on MATH-500. This is most clear on the math-specialized models. Seed for seed, training on greedy accuracy rather than on the pass rate at $T = 1$ raises greedy accuracy, a benefit of the free choice of objective afforded \llmbo{}.
+    %-
+    %\item Computational efficiency, \llmbo{} utilizes a fraction of GRPO's compute and memory (Section~\ref{sec:efficiency}). \llmbo{} spends about \boComputeShare{}\% of GRPO's training FLOPs; trained on greedy accuracy, on the math-specialized models it passes GRPO's final greedy accuracy with its first GP-guided batch, \reachGreedyMathSmallUTwoGsm{} completions, where GRPO spends \grpoCompletions{}. Further, it needs no memory beyond inference, so it trains \grpoNoFitSmallCard{} of the \nLargeArch{} 7-8B architectures on a 24\,GB card where GRPO does not fit.
+    %-
+    \item Computational efficiency, as \llmbo{} utilizes a fraction of GRPO's compute and memory (Section~\ref{sec:efficiency}). \llmbo{} spends about \boComputeShare{}\% of GRPO's training FLOPs; trained on greedy accuracy, it passes GRPO's final greedy accuracy after \reachPoolGreedyGsm{} completions on average over the 7-8B models, where GRPO spends \grpoCompletions{}. Further, it needs no memory beyond inference, so on a 24\,GB card it keeps \boSequencesSmallCard{} sequences in memory on all 7-8B architectures, while GRPO cannot fit even its \grpoMicroBatch{}-sequence micro-batch on \grpoNoFitSmallCard{} of them.
+\end{itemize}
+The anonymized code of \llmbo{}, the GRPO baseline, and the evaluation are in the Supplementary Material.
+
+\section{Related Literature}\label{sec:related}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{results/fig_scaling_qwen.pdf}
+\caption{\textbf{TinyLoRA scaling laws under GRPO.} Greedy (solid) and avg@4 (dashed) accuracy at the end of training under GRPO (mean $\pm$ s.e.\ over seeds) for TinyLoRA, LoRA-XS and LoRA as a function of trainable parameters. Results shown for Qwen2.5-7B, scaling for other model families can be found in Figure~\ref{fig:scaling-base}.}
+\label{fig:scaling-qwen}
+\end{figure*}
+
+% \paragraph{Parameter-efficient fine-tuning.}
+LoRA \citep[Low-Rank Adaptation,][]{hu2022lora} trains a low-rank update $BA$ per weight matrix. LoRA-XS \citep{balazy2024loraxs} freezes $A$ and $B$ to the weight's truncated singular vectors and trains only an $r \times r$ matrix between them. TinyLoRA \citep{morris2026learning} expresses that matrix as a combination of $u$ many fixed random matrices and ties the $u$ coefficients across layers, thus allowing for a single trainable parameter. Under GRPO it retains most of the reasoning gain of full fine-tuning on Qwen2.5 models (see, e.g., Figure~\ref{fig:scaling-qwen}). The success of such small updates echoes the low intrinsic dimension of fine-tuning \citep{aghajanyan2021intrinsic}. We utilize the TinyLoRA's update, simplify its weight tying to a single scaling axis (Appendix~\ref{app:tying}), and replace its optimizer.
+
+% \paragraph{Reinforcement learning for reasoning.}
+GRPO \citep{shao2024deepseekmath} estimates advantages by normalizing rewards within a group of rollouts for the same prompt, removing PPO's value network \citep{schulman2017proximal}. SimpleRL-Zoo \citep{zeng2025simplerl} applies GRPO to base models of several families. We use training data tiers and prompts of SimpleRL-Zoo.
+
+% \paragraph{Bayesian optimization in higher dimensions.}
+GP-based BO \citep{williams2006gaussian,garnett_bayesoptbook_2023} is sample efficient in low dimensions but its global surrogate degrades as the dimension grows. TuRBO \citep{eriksson2019turbo} restricts the search to a trust region around the incumbent that expands on success and shrinks on failure. \citet{hvarfner2024vanilla} show that scaling the lengthscale prior with $\sqrt{D}$ lets plain GP BO work in high dimensions. Utilizing BoTorch \citep{balandat2020botorch}, we leverage both. Our observation model, a Gaussian moment-matched to the logit of a Beta posterior, follows the same framework as Dirichlet-based GP classification \citep{milios2018dirichlet}.
+
+% \paragraph{Gradient-free fine-tuning of language models.}
+MeZO \citep[memory-efficient zeroth-order optimizer,][]{malladi2023mezo} fine-tunes models with zeroth-order SPSA gradient estimates from forward passes only. Evolution strategies have also been scaled to full-parameter reasoning fine-tuning \citep{qiu2025evolution}. Both still take many small steps in millions to billions of dimensions; \llmbo{} instead exploits a search space small enough for a global surrogate model.
+%-
+\section{Background}\label{sec:background}
+\subsection{Gaussian-process Bayesian Optimization}
+The main goal in Bayesian optimization (BO) is to optimize an unknown function $f$ via only its evaluations: 
+\begin{equation}
+    \max_x f(x).
+\end{equation}
+To this end, BO provides a way to select locations at which to evaluate $f$. 
+It is, thus, useful to envision $f$ as being expensive to evaluate so that grid searches become infeasible. Given a set of locations $X=\{x_1,x_2,\dots,x_T\}$ and evaluations $Y=\{f(x_1),f(x_2),\dots,f(x_T)\}$, BO provides a way to select the best next evaluation location. %Under the assumption that $f$ follows a GP then we have each $f(x_i)$ follows a normal density and thus the joint density of $\{f(x_i)\}$ is also normally distributed. 
+In BO, we typically assume that $f$ can be modeled by a Gaussian Process (GP) as $g \sim \mathcal{GP}(0, k)$ where  $k$ is the covariance function and conditioning on noisy observations $y_n = g(\theta_n) + \varepsilon_n$, $\varepsilon_n \sim \mcN(0, \sigma_n^2)$.  With $K = [k(\theta_n, \theta_m)]_{nm}$, $\Lambda = \mathrm{diag}(\sigma_n^2)$ and $\mathbf{k}(\theta) = [k(\theta, \theta_n)]_n$, the posterior is also a GP with \citep{williams2006gaussian}
+\begin{align}
+    \mu(\theta) &= \mathbf{k}(\theta)^\top (K + \Lambda)^{-1} \mathbf{y}, \nonumber \\
+    k'(\theta, \theta') &= k(\theta, \theta') - \mathbf{k}(\theta)^\top (K + \Lambda)^{-1} \mathbf{k}(\theta').
+\end{align}
+%That is, we have a prior $f\sim \mcN()$ and so $f|X,$ and marginal
+
+%The posterior is available in closed-form and is also a GP with posterior parameters 
+% \begin{align*}
+%     \mu_{T+1}(x) &= k(x,X)^T(K+\sigma^2I)^{-1}Y \\
+%     k_{T+1}(x,x') &= k(x,x') -  k(x,X)^T(K+\sigma^2I)^{-1} k(x,X)
+% \end{align*}
+% For more details on BO and the derivation of this posterior, we refer to \cite{williams2006gaussian}.
+% We also note that in BO one could consider observational noise but in our setting our observations are exact.
+%In our setting, we aim to maximize a stochastic function's expected outcome, that is our maximisation problem is of the form $$\max_x \mbE(g(x)).$$ While we have that $g\sim Bin(n,p)$ we approximate the binomial with a Gaussian.
+%-
+% BO maximizes an expensive black-box function $f$ by placing a GP prior 
+% $g \sim \mathcal{GP}(0, k)$ on it and conditioning on noisy observations $y_n = g(\theta_n) + \varepsilon_n$, $\varepsilon_n \sim \mcN(0, \sigma_n^2)$. 
+% With $K = [k(\theta_n, \theta_m)]_{nm}$, $\Lambda = \mathrm{diag}(\sigma_n^2)$ and $\mathbf{k}(\theta) = [k(\theta, \theta_n)]_n$, the posterior is again a GP with
+% \begin{align}
+%     \mu(\theta) &= \mathbf{k}(\theta)^\top (K + \Lambda)^{-1} \mathbf{y}, \nonumber \\
+%     k'(\theta, \theta') &= k(\theta, \theta') - \mathbf{k}(\theta)^\top (K + \Lambda)^{-1} \mathbf{k}(\theta')
+% \end{align}
+% \citep{williams2006gaussian}. An acquisition rule on this posterior picks the next evaluations.
+\subsection{LoRA and low-parameter variants}
+For a frozen weight $W \in \mbR^{d \times k}$, LoRA \citep{hu2022lora} trains a low-rank update,
+\begin{equation}
+    W' = W + \frac{\alpha}{r} B A, \qquad B \in \mbR^{d \times r},\ A \in \mbR^{r \times k},
+    \label{eq:lora}
+\end{equation}
+with scale $\alpha$, $A$ initialized at random and $B = 0$, so that training starts from the base model. It trains $r(d + k)$ parameters per weight matrix, which is significantly lower than full fine tuning, achieving comparable performance.
+However, for a 7B model this means millions of trainable parameters, even at $r = 1$.
+
+LoRA-XS \citep{balazy2024loraxs} instead takes the rank-$r$ SVD $W \approx U \Sigma V^\top$, freezes both factors and trains only a small matrix $R$ between them,
+\begin{equation}
+    W' = W + U \Sigma R V^\top, \qquad R \in \mbR^{r \times r},
+    \label{eq:loraxs}
+\end{equation}
+which contributes $r^2$ trainable parameters per weight matrix, independent of $d$ and $k$.
+This significantly reduces the trainable parameters (a few thousand at the lowest) while retaining much of LoRA's performance.
+
+TinyLoRA \citep{morris2026learning} goes further and expresses $R$ as a combination of fixed random matrices,
+\begin{equation}
+    W' = W + U \Sigma \Big( \sum_{i=1}^{u} v_i P_i \Big) V^\top,
+    \label{eq:tinylora}
+\end{equation}
+with frozen random matrix $P_i \in \mbR^{r \times r}$, $P_i \sim \mcN(0, 1)$ entrywise, drawn independently for every module, and a single coefficient vector $\theta = v \in \mbR^u$ shared by every attention and MLP projection of the network (full weight tying; Appendix~\ref{app:tying}). The adapter has $u$ trainable parameters, and $\theta = 0$ is the base model. We use $r = 2$ throughout.
+
+\subsection{GRPO}
+For each training prompt $q$, GRPO samples a group of $G$ completions $o_1, \dots, o_G$ from the current policy at temperature $T = 1$, scores each with a binary correctness reward $R_j$, and uses the group-normalized advantage %$A_j = (R_j - \mathrm{mean}_j R_j) / \mathrm{std}_j R_j$
+\begin{equation}
+    A_j = \frac{R_j - \mathrm{mean}(R_j)}{\mathrm{std}(R_j)}
+    \label{eq:advantage}
+\end{equation}
+in a clipped importance-weighted objective,
+\begin{equation*}
+    \mathcal{J}(\theta) = \mbE_{q, \{o_j\}} \frac{1}{G} \sum_{j=1}^{G} \frac{1}{|o_j|} \sum_{t=1}^{|o_j|} \min\!\big( \rho_{j,t} A_j,\ \hat\rho_{j,t} A_j \big),
+\end{equation*}
+where $\rho_{j,t} = \pi_\theta(o_{j,t} \mid q, o_{j,<t}) / \pi_{\theta_\mathrm{old}}(o_{j,t} \mid q, o_{j,<t})$ and $\hat\rho_{j,t} = \mathrm{clip}(\rho_{j,t}, 1 - \epsilon, 1 + \epsilon)$ for $\epsilon>0$.
+Each step needs the rollouts, a forward pass of the policy for the old log-probabilities, and a bidirectional pass for the gradient.
+%-
+\section{Proposed Method}
+\label{sec:method}
+
+\subsection{The Black-box}
+
+Our goal is to maximize the adapted model's pass rate, however defined, on the training distribution:
+\begin{equation}
+    f(\theta) = \Pr_{q \sim \mcD,\ o \sim \pi_\theta(\cdot \mid q)}\big[ o \text{ answers } q \text{ correctly} \big],
+\end{equation}
+
+where $o$ is either one completion sampled at $T = 1$ (the rollout distribution on which GRPO trains) or the greedy completion (the decoding rule of deployment), and $\mcD$ represents the training data.
+
+One completion per prompt is the most informative use of a fixed budget: completions of the same prompt are correlated, so $G$ of them carry the information of fewer than $G$ independent ones (Appendix~\ref{sec:one-per-prompt}).
+In our numerical study, \llmbo{} therefore scores each candidate on one completion per prompt, while GRPO needs a group of $G \ge 2$ completions per prompt to estimate advantages and uses $G = 4$.
+Since a policy gradient needs sampled rollouts, GRPO cannot optimize the (piecewise-constant in $\theta$) greedy objective and is always trained on the pass rate at $T = 1$, whereas \llmbo{} is trained on the objective that matches the metric it is evaluated on.
+
+\begin{figure*}[t]
+\centering
+\includegraphics{results/fig_scatter_bases_id.pdf}
+\caption{Gain over the base model of \llmbo{} against that of GRPO on the in-distribution benchmarks, for the four vanilla base models; avg@4 (open) and greedy accuracy (filled), one point per $u \le 4$ (marker), mean $\pm$ s.e.\ over seeds. \llmbo{} ($b = 1$) is trained on the metric of each point; points in the shaded half favor \llmbo{}. Every model and benchmark in Figure~\ref{fig:scatter-main}.}
+\label{fig:scatter-bases}
+\end{figure*}
+
+The training objective for a candidate $\theta$ involves returning the number of solutions $s$ out of $n$ attempted prompts, which may be profitably conceived as binomial distribution.
+However, inference on stochastic processes with a binomial outcome is considerably harder than Gaussian process inference, which motivates a Gaussian approximation.
+But for some models on some benchmarks, pass rates will lie near 0 or 1, making the standard Gaussian approximation poor for smaller $n$.
+We therefore deploy at the batch-level a Bayesian Uniform-prior Binomial analysis to estimate the mean and variance associated with a batch.
+Under such an analysis, the batch-level posterior takes form $\textrm{Beta}(\alpha,\beta)$ for $\alpha = 1+s$ and $\beta = 1+n-s$.
+We transform this posterior via the logit function to achieve a real-valued quantity suitable for Gaussian process interpolation.
+The posterior mean and variance in logit space are given by:
+\begin{equation}
+    \hat\mu = \psi(\alpha) - \psi(\beta), \qquad \hat\sigma^2 = \psi_1(\alpha) + \psi_1(\beta),
+\end{equation}
+with $\psi$ the digamma and $\psi_1$ the trigamma function.
+We add a learned noise floor to the GP for prompt-to-prompt variation not captured by this intra-prompt standard error.
+Appendix~\ref{app:obsmodel} compares this scheme with a classical Gaussian approximation.
+
+The $b$ candidates of a batch (one by default) are scored in one call of a vLLM engine \citep{kwon2023vllm}, each attached as its own LoRA adapter.
+Subsequently, $\hat\mu$ is then treated as the black-box response $y$ and $\sqrt{\hat\sigma^2}$ as its standard error, both of which are added to the GP training data and the mdoel refit.
+The GP runs on CPU while the GPU only runs the inference engine.
+%A candidate is $u$ numbers and its pass count, so the prompts of a batch, and for $b > 1$ its candidates, can be spread over devices with only these scalars exchanged.
+A candidate $\theta$ consists merely of $u$ floating point numbers and its integer pass count, so the prompts of a batch, and for $b > 1$ its candidates, can be spread over devices with only these scalars exchanged.
+
+\subsection{BO Strategy}
+
+We fit a GP using a Mat\'ern 5/2 kernel with one lengthscale per dimension on inputs rescaled to the unit cube and standardized outputs following BO best practices \citep{snoek2012practical}.
+Following \citet{hvarfner2024vanilla}, we endow the lengthscales with a Lognormal prior $\mathrm{LogNormal}(\sqrt{2} + \log(L\sqrt{D}), \sqrt{3})$ with $D = u$ and $L$ defined in next paragraph.
+Hyperparameters are fit by maximization \textit{a posteriori}.
+
+Our acquisition strategy is based on TuRBO-1 \citep{eriksson2019turbo}, which involves searching within a \textit{trust region}.
+A trust region is a subset of the search space given by a box centered at the current design point with the highest posterior mean, with each side length given by a common constant $L$ subsequently scaled by that dimension's lengthscale in the Mat\'ern kernel.
+After each observation from the black box, we perform the following iteration.
+First, we refit the GP, which also updates the size of the trust region.
+Then, to form each element of the batch, we perform Thompson sampling over a Sobol set of candidate locations inside the trust region and selects the maximing argument for inclusion in the batch.
+
+Following \citet{eriksson2019turbo}, we update the common trust region length $L$ on the basis of success of the search: if the most recent observation improved on the incumbent value, that is labeled a success, and if not, a failure. 
+Three consecutive successes doubles $L$, $\lceil \max(4, D)/b \rceil$ consecutive failures halve it, and when $L$ falls below $0.5^7$ the region restarts from a fresh Sobol design.
+However, \citet{eriksson2019turbo} was developed for noiseless simulators, and in our noisy setting the value of the most recent observation is insufficient for determining success or failure.
+We therefore instead define a success to be a batch whose posterior mean improves on the posterior mean of previously evaluated design points.
+We also use  the trust-region side $L$ in the lognormal prior such that it matches the region that the GP models. 
+
+Finally, we must define our search space over $\theta$ values. 
+We do this by considering the effective search space of a policy gradient method, which only a neighborhood of $\theta = 0$ in its budget.
+With Adam, each coordinate moves by at most approximately the learning rate $\eta$ per step, so after $S$ steps $|\theta_i| \lesssim \eta S$.
+We therefore use the box $[-\eta S, \eta S]^u$ with GRPO's $\eta$ and $S$ as the bound for BO, making the effective search regions commensurable.
+%-
+
+
+
+\section{Experimental Results}
+\subsection{Experimental setup}\label{sec:experiments}
+\begin{table*}[t]
+\centering
+\caption{Paired gap \llmbo{} $-$ GRPO (points) per model (rows) at $u = 1, 2, 4$ and benchmark (columns), mean over seed pairs; green: \llmbo{} ahead. avg@4: accuracy averaged over four completions at $T{=}1$; greedy: accuracy of the greedy completion (Section~\ref{sec:greedy-objective}); \llmbo{} is trained on the metric of each column. One row block per $u$, each listing the four vanilla base models and the two math-specialized ones, each group closed by its \emph{Avg} row. Standard errors and $u \le 16$ in Table~\ref{tab:main}; the Qwen2.5 1.5B and Instruct models in Appendices~\ref{app:small} and~\ref{app:instruct}.}
+\label{tab:headline}\vspace{0.3em}
+\footnotesize\renewcommand{\arraystretch}{0.9}\setlength{\tabcolsep}{2.5pt}
+\input{results/tab_headline.tex}
+\vspace{6pt}
+\end{table*}
+% numbers, tables and figures come from overleaf/scripts/ (all.py, or one script per figure); rerun them, never edit results/ by hand
+
+%\paragraph{Models and training data.} 
+We fine-tune \nModels{} models from four families: Qwen2.5 1.5B and 7B \citep{qwen2025qwen25} in their base, Math \citep{yang2024qwen25math} and Instruct variants, Llama3.1-8B \citep{dubey2024llama3}, Mistral-7B \citep{jiang2023mistral}, DeepSeek-7B \citep{bi2024deepseekllm} and DeepSeek-Math-7B \citep{shao2024deepseekmath}, all with the SimpleRL-Zoo prompt templates \citep{zeng2025simplerl}. Training problems come from Hendrycks MATH \citep{hendrycks2021math} and GSM8K \citep{cobbe2021gsm8k}, split into the SimpleRL-Zoo difficulty tiers. The 1.5B models train on the \emph{easy} tier (GSM8K and MATH level 1) and the 7-8B models on the \emph{hard} tier (MATH levels 3-5). We also propose an ablation (Appendix~\ref{app:shift}) where the four Qwen2.5 base and Math models are trained on the full MATH training set, evaluating the effect of distribution shifts introduced by the SimpleRL zoo setup. No training set contains any of the MATH-500 or GSM8K test problems.
+
+%\paragraph{Adapters.}
+TinyLoRA ($r = 2$) runs at $u \in \{1, 2, 4, 8, 16, 64, 256\}$ trainable parameters under GRPO and at $u \le 8$ trainable parameters under \llmbo{}. We, further, include \llmbo{} at $u \in \{16, 64, 256\}$ in Appendix~\ref{sec:large-u}. As references at larger scales, LoRA and LoRA-XS at rank $r \in \{1, 2, 8, 32\}$ are run under GRPO, from hundreds of trainable parameters (LoRA-XS, $r = 1$) to tens of millions (LoRA, $r = 32$). Appendix~\ref{app:scaling} details the parameterization and the weight tying and how both depart from \citet{morris2026learning}. Figure~\ref{fig:scaling-qwen} places TinyLoRA on this scale. 
+
+On Qwen2.5-7B, GRPO with $u = 4$ parameters already gains \gainGrpoMeanQwenUFourMathFive{} points on MATH-500 avg@4 and with $u = 256$ it gains \gainGrpoMeanQwenUTwoFiftySixMathFive{}. Notably this latter gain is over half of LoRA's \loraGainMeanQwenMathFive{} with 81M parameters at $r = 32$. Qwen2.5-Math-7B scales similarly (\gainGrpoMeanMathUFourMathFive{}, \gainGrpoMeanMathUTwoFiftySixMathFive{} and \loraGainMeanMathMathFive{} points), while the Instruct model leaves little to gain at any scale (\loraGainMeanInstMathFive{} under LoRA). Figure~\ref{fig:scaling-base} displays every model (Appendices~\ref{app:scaling-results} and~\ref{app:instruct}).
+
+%\paragraph{Optimizers.}
+GRPO takes 64 prompts $\times$ 4 rollouts at $T = 1$ per step, with the binary math-verify correctness reward, no KL penalty, clip parameter $\epsilon = 0.2$ and a dual clip at $\delta = 2$ that keeps the loss bounded (Appendix~\ref{app:dual-clip}).
+The optimizer used is AdamW 8-bit with a constant learning rate after 10 warm-up steps ($10^{-3}/(r\sqrt{u})$ for TinyLoRA, $10^{-3}/r$ for LoRA-XS, $5 \cdot 10^{-6}$ for LoRA).
+Prompts are capped at 512 tokens and completions at 1024. Each \llmbo{} batch generates the same 256 completions as a GRPO step, one candidate on $n = 256$ prompts ($b = 1$), and \llmbo{} runs as many GP-guided batches as GRPO takes steps, plus its initial and restart designs. It scores candidates on the pass rate under the decoding rule of the evaluation metric: at $T = 1$, GRPO's own objective, for avg@4, and greedily for greedy accuracy (Section~\ref{sec:greedy-objective}; Appendix~\ref{app:objective} compares the two objectives seed for seed). An ablation with $b = 4$ spreads the same 256 completions over four candidates on $n = 64$ prompts each, testing whether evaluating more adapters per completion makes the search more completion-efficient (Appendix~\ref{sec:parallel}).
+
+
+%\paragraph{Paired seeds.} 
+\llmbo{} seed $k$ uses the SVD bases and random projections of GRPO seed $k$, pinned so that they do not depend on the GPU model (Appendix~\ref{app:svd-signs}). The two runs of a seed thus differ only in the optimizer, and every comparison is paired by seed. Experiments at $u \le 4$ use 8 seeds for GRPO and for \llmbo{} at $b = 1$ and $b = 4$. Every other experiment uses 3 seeds.
+
+%\paragraph{Evaluation.} 
+We evaluate on MATH-500 \citep{lightman2024verify}, GSM8K, AIME24 \citep{aime24}, AMC23 \citep{amc23}, Minerva Math \citep{lewkowycz2022minerva}, and OlympiadBench \citep{he2024olympiadbench} with one harness, the math-verify grader and the 1024-token completion budget of training for every model. MATH-500 and GSM8K are the in-distribution tasks. MATH-500 is drawn from the distribution of every training set; GSM8K is part of the easy tier and a same-domain, easier task for the 7-8B models. The four competition benchmarks measure out-of-distribution (OOD) generalization. These are small datsets composed of 30-675 problems each and are much harder problems that differ significantly from the ones found in the training set.
+
+We report two metrics 1. \emph{avg@4}, the accuracy averaged over four completions at $T = 1$ and 2. \emph{greedy} accuracy, that of the single completion at $T = 0$. Here avg@4 is the headline metric, it is the expected accuracy at $T=1$ that both optimizers train on. So, objective, rollout distribution and metric match, and the comparison isolates the optimizer. Greedy accuracy is the accuracy of the model as usually deployed, which \llmbo{} can optimize directly (Section~\ref{sec:greedy-objective}). Every number is reported per benchmark and per $u$, as mean $\pm$ standard error over seeds or, for paired gaps {\llmbo{} $-$ GRPO}, over seed pairs. Greedy evaluations at intermediate checkpoints (steps $1, 2, 4, \dots$) trace accuracy against completions generated.
+
+\subsection{Results}
+\label{sec:results}
+\label{sec:pooled}
+
+Table~\ref{tab:headline} gives the paired gap \llmbo{} $-$ GRPO per model at $u = 1, 2, 4$ on all six benchmarks, in avg@4 and in greedy accuracy, with each model group closed by its average row. This section discusses avg@4, the objective both optimizers train on; Section~\ref{sec:greedy-objective} turns to greedy accuracy. Appendix~\ref{app:results} gives the full per-model analysis: the gains of both optimizers over the base model and their paired gap at every $u$ (Figures~\ref{fig:scatter-main} and~\ref{fig:gap-main}, Table~\ref{tab:main}).
+
+%\paragraph{\llmbo{} leads GRPO across model families.} 
+Pooled over the four vanilla base models, one per family (Figure~\ref{fig:scatter-bases}), \llmbo{} leads GRPO at every $u \le 4$: by \poolToneMeanUOneGsmBase{}, \poolToneMeanUTwoGsmBase{}, and \poolToneMeanUFourGsmBase{} points on GSM8K at $u = 1, 2, 4$, and by \poolToneMeanUOneMathFiveBase{}, \poolToneMeanUTwoMathFiveBase{}, and \poolToneMeanUFourMathFiveBase{} on MATH-500. Over the two math-specialized models the lead increases to \poolToneMeanUTwoGsmMathVariants{} and \poolToneMeanUFourGsmMathVariants{} points on GSM8K at $u = 2, 4$ and \poolToneMeanUTwoMathFiveMathVariants{} and \poolToneMeanUFourMathFiveMathVariants{} on MATH-500. Over the two Qwen2.5 1.5B models the optimizers are level (Appendix~\ref{app:small}). These performance gains are with the same objective, rollout distribution, and metric as GRPO, so \llmbo{} is, thus, at least as good an optimizer in the ultra-low-parameter regime, and a better one where the random subspace sampled contains a gain to be had.
+
+%\paragraph{The lead is largest where TinyLoRA has most to gain.}
+This is the case for the two Qwen2.5 7B models (Figure~\ref{fig:scaling-qwen}). On Qwen2.5-7B, \llmbo{} gains \gainToneMeanQwenUOneMathFive{}, \gainToneMeanQwenUTwoMathFive{}, and \gainToneMeanQwenUFourMathFive{} points on MATH-500 at $u = 1, 2, 4$, against GRPO's \gainGrpoMeanQwenUOneMathFive{}, \gainGrpoMeanQwenUTwoMathFive{}, and \gainGrpoMeanQwenUFourMathFive{}, with a paired gap of \gapToneMeanQwenUTwoMathFive{} at $u = 2$. On Qwen2.5-Math-7B its paired gap at $u = 4$ is \gapToneMeanMathUFourGsm{} on GSM8K and \gapToneMeanMathUFourMathFive{} on MATH-500. On both models the lead carries over to most OOD benchmarks (Appendix~\ref{app:results-ood}), and it holds when they train on the full MATH training set instead of the hard tier. Pooled over the two, \llmbo{}'s paired gap on MATH-500 is then \poolToneMeanUTwoMathFiveShiftLargeMathTrain{} and \poolToneMeanUFourMathFiveShiftLargeMathTrain{} points at $u = 2, 4$ (Appendix~\ref{app:shift}). On Llama3.1-8B, Mistral-7B and DeepSeek-7B, whose TinyLoRA subspace holds little, and on the Qwen2.5 1.5B models, \llmbo{} is level with GRPO. That is, where there is little to find, it gives up nothing. On the already RL-tuned Instruct models neither optimizer gains enough to differentiate a gain from noise (Appendix~\ref{app:instruct}).
+
+%\paragraph{The edge belongs to the low-parameter end.} 
+\llmbo{} leads where a GP can cover the search space within the budget. For $u = 8$, Qwen2.5-7B's MATH-500 lead is gone (\gapToneMeanQwenUEightMathFive{}), while Qwen2.5-Math-7B stays ahead (\gapToneMeanMathUEightGsm{} on GSM8K). At $u \in \{64, 256\}$, with the evaluation budget used at $u \le 16$, \llmbo{} is not yet robust: pooled over the Qwen2.5 7B models its paired gap on MATH-500 is \poolToneMeanUSixtyFourMathFiveLargeU{} and \poolToneMeanUTwoFiftySixMathFiveLargeU{} points, with single seed pairs as low as $\worstToneMeanLargeMathFive{}$ (Appendix~\ref{sec:large-u}).
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{results/fig_budget_main.pdf}
+\caption{\llmbo{} against GRPO, gain over the base model in greedy accuracy as a function of training completions generated, on GSM8K (solid) and MATH-500 (dashed, open markers).
+Mean $\pm$ s.e.\ over seeds, averaged over $u \le 4$ and the four 7-8B model families; circles mark where \llmbo{} passes GRPO's final gain (dotted) for good.
+%\llmbo{} ($b = 1$) is trained on greedy accuracy; its adapter at each point is its evaluated trial of highest posterior mean, and its completions are counted from the end of its initial design. Qwen2.5-7B averages the base and Math models, each counted once. Trained on the SimpleRL-Zoo tiers.
+Each model and $u$ separately in Figure~\ref{fig:budget}.
+}
+\label{fig:budget-main}
+\end{figure}
+
+\begin{table*}[t]
+\centering
+\caption{Single-GPU memory feasibility per architecture.
+Weights in bf16. Each cell reports the number of simultaneous
+full-length sequences that fit on each GPU, in \llmbo{}/GRPO order.
+Green: \llmbo{} fits more.
+\textcolor{red!70}{\ding{55}}:
+the method does not fit.}
+\label{tab:gpu-feasibility}
+\vspace{4pt}\small\setlength{\tabcolsep}{17.5pt}
+\input{results/tab_chips.tex}
+\vspace{6pt}
+\end{table*}
+
+\subsection{Training on greedy decoding directly}
+\label{sec:greedy-objective}
+\label{sec:greedy}
+\label{sec:objective}
+\label{sec:ablations}
+
+GRPO needs sampled rollouts, so it optimizes accuracy at the sampling temperature, while a deployed model is often decoded greedily. \llmbo{} only needs objective values, so it can score candidates on greedy accuracy itself, a piecewise-constant function of the adapter that no policy gradient can follow. Here \llmbo{} trains on greedy accuracy, GRPO trains as before, and both are evaluated greedily (greedy columns of Table~\ref{tab:headline}; per model in Appendix~\ref{app:results}).
+
+%\paragraph{\llmbo{} leads on greedy accuracy.} 
+Pooled over the four vanilla base models, \llmbo{} leads GRPO on greedy MATH-500 at $u = 2, 4$, by \poolGreedyGreedyUTwoMathFiveBase{} and \poolGreedyGreedyUFourMathFiveBase{} points, and on greedy GSM8K at $u = 1, 4$, by \poolGreedyGreedyUOneGsmBase{} and \poolGreedyGreedyUFourGsmBase{}, and is level elsewhere. The lead is largest on the math-specialized models: \poolGreedyGreedyUOneGsmMathVariants{}, \poolGreedyGreedyUTwoGsmMathVariants{}, and \poolGreedyGreedyUFourGsmMathVariants{} points on greedy GSM8K pooled over the two 7B models and \gapGreedyGreedyMathSmallUOneGsm{}, \gapGreedyGreedyMathSmallUTwoGsm{}, and \gapGreedyGreedyMathSmallUFourGsm{} on Qwen2.5-Math-1.5B at $u = 1, 2, 4$ (Appendix~\ref{app:greedy-small}).
+
+%\paragraph{The objective earns the lead.} 
+Blocking over seeds, \llmbo{} trained on greedy accuracy beats \llmbo{} trained on the pass rate at $T = 1$ in greedy accuracy at $u = 4$, by \objectiveUFourGsmBase{} points on greedy GSM8K over the vanilla models and \objectiveUFourGsmMathVariants{} over the math models (Appendix~\ref{app:objective}). The decoding rule is thus a free choice of objective for \llmbo{}: a model that will be decoded greedily can be trained for greedy decoding directly.
+
+\subsection{Compute and memory efficiency}
+\label{sec:efficiency}
+
+\llmbo{} reaches these gains with a fraction of GRPO's compute, completions, and memory (Appendix~\ref{app:efficiency}).
+
+%\paragraph{Compute.} 
+Each completion costs \llmbo{} one forward pass per token, and it fits its GP on the CPU. GRPO also rescores every completion and passes it forward and backward through the model, at least \grpoPasses{} forward passes per token in all, so over a median run \llmbo{} spends about \boComputeShare{}\% of GRPO's training FLOPs.
+
+%\paragraph{Completions.} 
+Averaged over the four 7-8B families and $u \le 4$, \llmbo{} trained on greedy accuracy passes GRPO's final greedy accuracy after \reachPoolGreedyGsm{} completions on GSM8K and \reachPoolGreedyMathFive{} on MATH-500, where a median GRPO run generates \grpoCompletions{} (Figure~\ref{fig:budget-main}). It ends \poolEndGreedyGsm{} and \poolEndGreedyMathFive{} points above the base model, against GRPO's \poolEndGrpoGsm{} and \poolEndGrpoMathFive{}. On Qwen2.5-Math-1.5B at $u = 2$ it passes GRPO's final accuracy with its first GP-guided batch, \reachGreedyMathSmallUTwoGsm{} completions (Figure~\ref{fig:budget}).
+
+%\paragraph{Memory.} 
+\llmbo{} needs no memory beyond inference, while GRPO's backward pass holds \grpoOverheadSmall{}\,GiB on the 1.5B models and \grpoOverheadLarge{}\,GiB on the 7-8B ones for every \grpoMicroBatch{} sequences it trains on. On a 24\,GB card, GRPO cannot fit even its \grpoMicroBatch{}-sequence micro-batch on \grpoNoFitSmallCard{} of the \nLargeArch{} 7-8B architectures, while \llmbo{} runs \boSequencesSmallCard{} sequences concurrently on all of them (Table~\ref{tab:gpu-feasibility}; measurements and estimates in Appendix~\ref{sec:cost}, Table~\ref{tab:memory}).
+
+
+\section{Discussion}
+\label{sec:discussion}
+\subsection{Limitations}
+\label{sec:limitations}
+\llmbo{} targets the ultra-low-parameter end; from $u = 8$ its edge fades, and at $u \in \{64, 256\}$ it trails GRPO and varies strongly across seeds (Appendix~\ref{sec:large-u}), so there a gradient remains the natural choice, and combining the two, e.g.\ BO over a low-dimensional subspace of a larger adapter, is a promising direction. On most models TinyLoRA at $u \le 4$ moves accuracy little under either optimizer (Appendix~\ref{sec:base}), so the strongest results are based on the Qwen2.5 base and Math models; adapters that reach further into other families are also promising.
+Our compute comparison counts FLOPs; wall-clock savings also depend on how efficiently the inference engine batches generation.
+
+\subsection{Conclusion}
+\label{sec:conclusion}
+In the ultra-low-parameter regime, \llmbo{} is a suitable alternative to GRPO: trust-region BO on the pass rate matches or exceeds GRPO's fine-tuning gains across model families, variants, sizes and training data
+This effect is most prominent when TinyLoRA exhibits the greatest gains and when we optimize the greedy-decoding accuracy directly.
+This accuracy win occurs with a fraction of GRPO's compute and memory.
+
+A candidate is a handful of scalars and its score is a pass count, so \llmbo{} scales across devices with almost no synchronization, and its memory footprint makes fine-tuning possible on inference-only hardware. BO also opens objectives that are awkward for policy gradients: non-differentiable metrics, decoding-rule-specific accuracy, or multi-objective trade-offs between accuracy and length, and its posterior mean offers a natural stopping rule.
+
+\FloatBarrier
+
+\subsection*{AI use statement}
+In this work, we used generative AI tools for implementation (code generation and editing), figure creation, paper drafting and editing, and formatting.
+We have not used generative AI tools for theoretical model development, mathematical claims, hypothesis refinement or research methodology design.
+All AI-assisted code and text were reviewed and verified by the authors, who take responsibility for the final content of this work.
+
+\subsection*{Reproducibility statement}
+The anonymized code, with its dependencies, is in the supplementary material: the adapters, \llmbo{}, the GRPO baseline, the evaluation harness and the job scripts of every run. Table~\ref{tab:hparams} lists every hyperparameter of both optimizers and Appendix~\ref{app:harness} the evaluation harness; all tables, figures and quoted numbers are generated from the run directories by the scripts in \texttt{paper/scripts}, also in the supplementary material. Every exported adapter stores its SVD bases, so its search space can be rebuilt exactly on any hardware (Appendix~\ref{app:svd-signs}).
+
+
+\bibliographystyle{apalike}
+\bibliography{references}
+
+\input{checklist.tex}
+
+% appendices: one per topic, each on its own page
+\clearpage
+\appendix
+\onecolumn
+\aistatstitle{How Low Can You Go: Fine-Tuning LLMs with Bayesian Optimization (\llmbo{}): \\
+Supplementary Materials}
+\suppressfloats[t]
+\section{Per-model results}
+\label{app:results}
+This appendix details Sections~\ref{sec:results} and~\ref{sec:greedy-objective} per model, in avg@4 and in greedy accuracy, for one 7-8B base model per family (Section~\ref{sec:base}) and the two math-specialized models (Section~\ref{sec:math}); the 1.5B and Instruct models are in Appendices~\ref{app:small} and~\ref{app:instruct}, the pooled greedy gaps and the comparison of \llmbo{}'s two objectives in Appendix~\ref{app:greedy}. Figure~\ref{fig:scatter-main} compares the two optimizers' gains at $u \le 4$, Figure~\ref{fig:gap-main} traces their paired gap over $u \le 16$, with the $b = 4$ ablation, and Table~\ref{tab:main} lists both on all six benchmarks. In greedy accuracy \llmbo{} is trained on greedy accuracy, so GRPO is evaluated across a shift in decoding rule that \llmbo{} does not face.
+
+\begin{table}[!htbp]
+\centering
+\caption{Avg@4 (a) and greedy (b) accuracy at the end of training, for the four vanilla base models, then the two math-specialized ones (row blocks), per $u \le 16$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks); \llmbo{} is trained on the metric of each subtable (greedy: Section~\ref{sec:greedy-objective}). \emph{base}: accuracy of the base model in that metric (\%). \emph{GRPO}, \emph{\llmbo{}}: gain over the base model (points), mean over seeds (GRPO and avg@4-trained \llmbo{} 8 per cell at $u \le 4$ and 3 at $u = 8, 16$, greedy-trained \llmbo{} 3 per cell); bold: the larger, unless tied. $\Delta$: paired gap \llmbo{} $-$ GRPO, mean $\pm$ s.e.\ over the seed pairs both have, so it can differ from the difference of the two gains; tint: its sign and size (green: \llmbo{} ahead).}
+\label{tab:main}
+\renewcommand{\arraystretch}{0.85}
+{\small (a) avg@4}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_main_avg4.tex}}\\[0.8em]
+{\small (b) greedy}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_main_greedy.tex}}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_scatter_main.pdf}
+\caption{Gain over the base model of \llmbo{} against GRPO's, in avg@4 and in greedy accuracy (color; greedy filled, avg@4 open), \llmbo{} trained on the metric of each point, for the one 7-8B base model per family and the two math-specialized 7B models (rows, in two blocks) on each benchmark (columns), each panel on its own axes. Training uses GSM8K and MATH: the left two columns are in-distribution, the four benchmarks right of the dotted line out-of-distribution. One point per $u \le 4$ (marker), mean $\pm$ s.e.\ over seeds. Points in the shaded half above the diagonal favor \llmbo{}; dashed: no gain.}
+\label{fig:scatter-main}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_gap_main.pdf}
+\caption{Paired gap \llmbo{} $-$ GRPO in avg@4 and in greedy accuracy (color), \llmbo{} trained on each metric, against $u \in \{1, \dots, 16\}$, mean $\pm$ s.e.\ over seed pairs, for the one 7-8B base model per family and the two math-specialized 7B models (rows, in two blocks), one column per benchmark (in-distribution GSM8K and MATH-500 first, then the four out-of-distribution benchmarks), each panel on its own gap axis. Solid, filled: $b = 1$ candidate per batch (the default); dashed, open: the $b = 4$ ablation.}
+\label{fig:gap-main}
+\end{figure}
+
+\subsection{Base models across families}
+\label{sec:base}
+\label{sec:scale}
+\label{sec:gains}
+\label{sec:per-model-base}
+
+Which models TinyLoRA can move at all is set by its scaling under GRPO (Appendix~\ref{app:scaling-results}): Qwen2.5-7B a lot, Llama3.1-8B, Mistral-7B and DeepSeek-7B by at most \othersTinyBest{} points at $u \le 4$. On these three the comparison checks that \llmbo{} is as safe as GRPO.
+
+\paragraph{Qwen2.5-7B.} On the one base model TinyLoRA moves, \llmbo{} lies above the diagonal on both in-distribution tasks in avg@4 at every $u \le 4$ (Section~\ref{sec:results}); on GSM8K avg@4 it gains \gainToneMeanQwenUTwoGsm{} points at $u = 2$ against GRPO's \gainGrpoMeanQwenUTwoGsm{}. Greedy GSM8K barely moves under either optimizer, while on greedy MATH-500 \llmbo{} gains \gainGreedyGreedyQwenUOneMathFive{}, \gainGreedyGreedyQwenUTwoMathFive{} and \gainGreedyGreedyQwenUFourMathFive{} points at $u = 1, 2, 4$ against GRPO's \gainGrpoGreedyQwenUOneMathFive{}, \gainGrpoGreedyQwenUTwoMathFive{} and \gainGrpoGreedyQwenUFourMathFive{}, a paired gap that grows to \gapGreedyGreedyQwenUFourMathFive{} at $u = 4$. From $u = 8$ the MATH-500 lead is gone in both metrics (\gapToneMeanQwenUEightMathFive{} in avg@4, \gapGreedyGreedyQwenUEightMathFive{} in greedy accuracy; Figure~\ref{fig:gap-main}).
+
+\paragraph{Llama, Mistral and DeepSeek.} The points of both optimizers sit close to the origin and to the diagonal: in avg@4 \llmbo{} is level with GRPO at every $u \le 4$, within a point on both tasks (e.g.\ \gapToneMeanLlamaUOneGsm{}, \gapToneMeanMistralUFourGsm{} and \gapToneMeanDeepseekBaseUFourGsm{} on GSM8K for Llama3.1-8B at $u = 1$, Mistral-7B and DeepSeek-7B at $u = 4$). Where TinyLoRA's subspace holds little, \llmbo{} gives up nothing to GRPO. In greedy accuracy it stays level with or slightly ahead of GRPO on GSM8K on Llama3.1-8B and Mistral-7B at every $u \le 4$ (Llama \gapGreedyGreedyLlamaUOneGsm{}, \gapGreedyGreedyLlamaUTwoGsm{}, \gapGreedyGreedyLlamaUFourGsm{}; Mistral \gapGreedyGreedyMistralUOneGsm{}, \gapGreedyGreedyMistralUTwoGsm{}, \gapGreedyGreedyMistralUFourGsm{}), and up to $u = 16$ (\gapGreedyGreedyLlamaUSixteenGsm{}, \gapGreedyGreedyMistralUSixteenGsm{}). Pooled over the four base models it is level with or ahead of GRPO in greedy accuracy at every $u \le 4$ on both tasks (Section~\ref{sec:greedy-objective}): optimizing the deployed decoding rule directly finds some gain even here.
+
+\paragraph{Beyond $u = 4$.} The edge is specific to the low-parameter end, where a GP can cover the search space within the budget: at $u = 16$ the avg@4 gap turns negative on GSM8K for Mistral (\gapToneMeanMistralUSixteenGsm{}), and at $u \in \{64, 256\}$ \llmbo{} is not yet robust across seeds (Section~\ref{sec:large-u}).
+
+\FloatBarrier
+\subsection{Math variants}
+\label{sec:math}
+
+The math-specialized models are continued-pretrained on mathematical text; Qwen2.5-Math-7B and DeepSeek-Math-7B are the two at 7B. As between the base models, TinyLoRA moves the Qwen model a lot and the DeepSeek one little (Appendix~\ref{app:scaling}).
+
+\paragraph{Qwen2.5-Math-7B.} Both optimizers gain several points, and \llmbo{}'s paired gap is positive at every $u \le 4$ and largest at $u = 4$ (Figure~\ref{fig:scatter-main}): it gains \gainToneMeanMathUFourGsm{} points on GSM8K avg@4 against GRPO's \gainGrpoMeanMathUFourGsm{} and \gainToneMeanMathUFourMathFive{} against \gainGrpoMeanMathUFourMathFive{} on MATH-500 avg@4, paired gaps of \gapToneMeanMathUFourGsm{} and \gapToneMeanMathUFourMathFive{}. The gaps vary widely across seeds, since single searches find or miss a several-point gain. In greedy accuracy \llmbo{} gains \gainGreedyGreedyMathUTwoGsm{} and \gainGreedyGreedyMathUFourGsm{} points on GSM8K at $u = 2, 4$ against GRPO's \gainGrpoGreedyMathUTwoGsm{} and \gainGrpoGreedyMathUFourGsm{}, and \gainGreedyGreedyMathUFourMathFive{} against \gainGrpoGreedyMathUFourMathFive{} on MATH-500 at $u = 4$. Unlike Qwen2.5-7B, the Math model stays ahead on both primary tasks at $u = 8$ in both metrics (avg@4: \gapToneMeanMathUEightGsm{} on GSM8K, \gapToneMeanMathUEightMathFive{} on MATH-500; greedy: \gapGreedyGreedyMathUEightGsm{} and \gapGreedyGreedyMathUEightMathFive{}; Figure~\ref{fig:gap-main}).
+
+\paragraph{DeepSeek-Math-7B.} In avg@4 \llmbo{} is level with GRPO at every $u \le 4$ (\gapToneMeanDeepseekUOneGsm{}, \gapToneMeanDeepseekUTwoGsm{} and \gapToneMeanDeepseekUFourGsm{} on GSM8K at $u = 1, 2, 4$), stays level at $u = 8$ and falls behind at $u = 16$ (\gapToneMeanDeepseekUSixteenGsm{} on GSM8K). Training on greedy accuracy pulls it ahead: it leads on greedy GSM8K at every $u \le 4$ (\gapGreedyGreedyDeepseekUOneGsm{}, \gapGreedyGreedyDeepseekUTwoGsm{} and \gapGreedyGreedyDeepseekUFourGsm{} points) and on greedy MATH-500 at $u = 4$ (\gapGreedyGreedyDeepseekUFourMathFive{}).
+
+\paragraph{Pooled.} Over the two Math models \llmbo{}'s lead grows with $u$ up to $u = 8$, where it is \poolToneMeanUEightGsmMathVariants{} points on GSM8K avg@4 and \poolToneMeanUEightMathFiveMathVariants{} on MATH-500 (Table~\ref{tab:main}a).
+
+\FloatBarrier
+\subsection{Larger adapters}
+\label{sec:large-u}
+
+\begin{table}[!htbp]
+\centering
+\caption{Avg@4 (a) and greedy (b) accuracy at the end of training, for the \nLargeModels{} Qwen2.5 7B models (row blocks), per $u \in \{64, 256\}$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks); \llmbo{} is trained on the metric of each subtable (greedy: Section~\ref{sec:greedy-objective}). \emph{base}: accuracy of the base model in that metric (\%). \emph{GRPO}, \emph{\llmbo{}}: gain over the base model (points), mean over seeds (3 per cell); bold: the larger, unless tied. $\Delta$: paired gap \llmbo{} $-$ GRPO, mean $\pm$ s.e.\ over the seed pairs both have, so it can differ from the difference of the two gains; tint: its sign and size (green: \llmbo{} ahead).}
+\label{tab:large-u}
+{\small (a) avg@4}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_large_u_avg4.tex}}\\[0.8em]
+{\small (b) greedy}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_large_u_greedy.tex}}
+\end{table}
+
+We also ran \llmbo{} at $u \in \{64, 256\}$ on the Qwen2.5 7B models with the settings and evaluation budget used at $u \le 16$ (Table~\ref{tab:large-u}). Here the method is not yet robust. Pooled over seed pairs, \llmbo{} trails GRPO on MATH-500 avg@4 by \poolToneMeanUSixtyFourMathFiveLargeU{} points at $u = 64$ and \poolToneMeanUTwoFiftySixMathFiveLargeU{} at $u = 256$. The mean hides the larger problem, the spread across seeds: single pairs fall up to \worstToneMeanLargeMathFive{} points behind GRPO on MATH-500. Where a search succeeds it remains competitive. Greedy accuracy shows the same: \llmbo{} trails GRPO on greedy MATH-500 by \poolGreedyGreedyUSixtyFourMathFiveLargeU{} and \poolGreedyGreedyUTwoFiftySixMathFiveLargeU{} points at $u = 64, 256$, with single pairs down to \worstGreedyGreedyLargeMathFive{}.
+At 1.5B the picture is the same: from $u = 64$ \llmbo{} falls behind on the base and Math models (\gapToneMeanQwenSmallUSixtyFourGsm{} and \gapToneMeanMathSmallUSixtyFourGsm{} on GSM8K avg@4), with pooled MATH-500 avg@4 gaps of \poolToneMeanUSixtyFourMathFiveLargeUSmall{} and \poolToneMeanUTwoFiftySixMathFiveLargeUSmall{} at $u = 64, 256$ and single pairs down to \worstToneMeanLargeMathFiveSmall{}, and greedy MATH-500 gaps of \poolGreedyGreedyUSixtyFourMathFiveLargeUSmall{} and \poolGreedyGreedyUTwoFiftySixMathFiveLargeUSmall{}.
+
+We attribute this to the search budget. The budget that lets a GP and its trust region cover 1-16 dimensions is thin in 64-256: the initial design and the $\lceil \max(4, D)/b \rceil$ failures a trust region tolerates before it shrinks grow with $u$, so a run spends a larger share of its batches on exploration and restarts less often, and a search can settle on a poor region. Its final pick then rests on few, noisy pass-rate estimates in a large space, where the winner's curse is strongest (Appendix~\ref{app:instruct-snr}). Budgets that grow with $u$, dimension-aware priors and trust regions, or searching a low-dimensional subspace of the adapter, with BO over the leading directions and the rest fixed, are natural remedies.
+
+\FloatBarrier
+\subsection{Out-of-distribution benchmarks}
+\label{app:results-ood}
+
+The four competition benchmarks are harder than the training data, further from it and small, from 30 problems (AIME24) to 675 (OlympiadBench), so their paired gaps are noisier than on the two in-distribution tasks, and on AIME24 a single seed can swing a gap by several points. Their gaps follow the in-distribution ones rather than trading off against them (Table~\ref{tab:main}, Figure~\ref{fig:gap-main}). On Qwen2.5-7B \llmbo{}'s paired gap at $u = 2$ is positive on all four benchmarks, and on AMC23, Minerva Math and OlympiadBench of the size of its in-distribution lead. On Qwen2.5-Math-7B it is positive on AMC23, Minerva Math and OlympiadBench at $u = 2, 4$ and on all four at $u = 8$, with AIME24, the smallest benchmark, the exception at $u \le 4$. On Llama3.1-8B, Mistral-7B and DeepSeek-7B, where the in-distribution gaps are within a point, so are the out-of-distribution ones at $u \le 4$. Where \llmbo{}'s pick is better on the training distribution, it is thus better beyond it too: its gains are not overfit to the training tier.
+
+\FloatBarrier
+\clearpage
+\section{Qwen2.5 1.5B models}
+\label{app:small}
+\label{sec:small}
+\label{sec:sizes}
+\label{app:greedy-small}
+The Qwen2.5 1.5B base and Math models train on the easy tier (Section~\ref{sec:experiments}). This appendix repeats the per-model analysis of Appendix~\ref{app:results} for them, in both metrics: each optimizer's gain and the paired gap (Table~\ref{tab:small}; Figures~\ref{fig:scatter-small} and~\ref{fig:gap-small}); the pooled gaps are in Table~\ref{tab:ablations}.
+
+\begin{table}[!htbp]
+\centering
+\caption{Avg@4 (a) and greedy (b) accuracy at the end of training, for Qwen2.5-1.5B and Qwen2.5-Math-1.5B (row blocks), per $u \le 16$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks); \llmbo{} is trained on the metric of each subtable (greedy: Section~\ref{sec:greedy-objective}). \emph{base}: accuracy of the base model in that metric (\%). \emph{GRPO}, \emph{\llmbo{}}: gain over the base model (points), mean over seeds (GRPO and avg@4-trained \llmbo{} 8 per cell at $u \le 4$ and 3 at $u = 8, 16$, greedy-trained \llmbo{} 3 per cell); bold: the larger, unless tied. $\Delta$: paired gap \llmbo{} $-$ GRPO, mean $\pm$ s.e.\ over the seed pairs both have, so it can differ from the difference of the two gains; tint: its sign and size (green: \llmbo{} ahead).}
+\label{tab:small}
+{\small (a) avg@4}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_small_avg4.tex}}\\[0.8em]
+{\small (b) greedy}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_small_greedy.tex}}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_scatter_small.pdf}
+\caption{Gain over the base model of \llmbo{} against GRPO's, in avg@4 and in greedy accuracy (color; greedy filled, avg@4 open), \llmbo{} trained on the metric of each point, for Qwen2.5-1.5B and Qwen2.5-Math-1.5B (rows) on each benchmark (columns), each panel on its own axes. Training uses GSM8K and MATH: the left two columns are in-distribution, the four benchmarks right of the dotted line out-of-distribution. One point per $u \le 4$ (marker), mean $\pm$ s.e.\ over seeds. Points in the shaded half above the diagonal favor \llmbo{}; dashed: no gain.}
+\label{fig:scatter-small}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_gap_small.pdf}
+\caption{Paired gap \llmbo{} $-$ GRPO in avg@4 and in greedy accuracy (color), \llmbo{} trained on each metric, against $u \in \{1, \dots, 16\}$, mean $\pm$ s.e.\ over seed pairs, for Qwen2.5-1.5B and Qwen2.5-Math-1.5B (rows), one column per benchmark (in-distribution GSM8K and MATH-500 first, then the four out-of-distribution benchmarks), each panel on its own gap axis. Solid, filled: $b = 1$ candidate per batch (the default); dashed, open: the $b = 4$ ablation.}
+\label{fig:gap-small}
+\end{figure}
+
+\paragraph{Qwen2.5-1.5B.} In avg@4 \llmbo{} is level with GRPO at $u \le 4$ (GSM8K \gapToneMeanQwenSmallUOneGsm{}, \gapToneMeanQwenSmallUTwoGsm{}, \gapToneMeanQwenSmallUFourGsm{}) and pulls ahead at $u = 16$ (\gapToneMeanQwenSmallUSixteenGsm{} on GSM8K, \gapToneMeanQwenSmallUSixteenMathFive{} on MATH-500; Figure~\ref{fig:gap-small}). In greedy accuracy it keeps a small lead on GSM8K at $u \le 4$ (\gapGreedyGreedyQwenSmallUOneGsm{}, \gapGreedyGreedyQwenSmallUTwoGsm{}, \gapGreedyGreedyQwenSmallUFourGsm{}).
+
+\paragraph{Qwen2.5-Math-1.5B.} In avg@4 \llmbo{} is level with GRPO at $u \le 4$ (GSM8K \gapToneMeanMathSmallUOneGsm{}, \gapToneMeanMathSmallUTwoGsm{}, \gapToneMeanMathSmallUFourGsm{}). In greedy accuracy its lead is the largest of any model: its points lie far above the diagonal (Figure~\ref{fig:scatter-small}), it leads GRPO on GSM8K by \gapGreedyGreedyMathSmallUOneGsm{}, \gapGreedyGreedyMathSmallUTwoGsm{} and \gapGreedyGreedyMathSmallUFourGsm{} points at $u = 1, 2, 4$ and on MATH-500 by \gapGreedyGreedyMathSmallUTwoMathFive{} at $u = 2$, stays ahead up to $u = 16$ (\gapGreedyGreedyMathSmallUEightGsm{} and \gapGreedyGreedyMathSmallUSixteenGsm{} on GSM8K at $u = 8, 16$) for both batch sizes alike, and is still level at $u = 64$ (\gapGreedyGreedyMathSmallUSixtyFourGsm{}; Figure~\ref{fig:gap-small}). At $u = 2$ it gains \gainGreedyGreedyMathSmallUTwoGsm{} points on GSM8K and \gainGreedyGreedyMathSmallUTwoMathFive{} on MATH-500, against GRPO's \gainGrpoGreedyMathSmallUTwoGsm{} and \gainGrpoGreedyMathSmallUTwoMathFive{}; on the OOD benchmarks it is level or ahead, most on Minerva Math. Part of this gain comes from suppressing a repetition loop that ends a large share of the base model's greedy GSM8K answers: a failure the greedy objective sees directly and a single TinyLoRA direction can switch off.
+
+\paragraph{Pooled.} Over the two 1.5B models \llmbo{} is level with GRPO in avg@4 at every $u$, within a point on GSM8K (\poolToneMeanUOneGsmSmall{}, \poolToneMeanUTwoGsmSmall{} and \poolToneMeanUFourGsmSmall{} points) and on MATH-500 (\poolToneMeanUOneMathFiveSmall{}, \poolToneMeanUTwoMathFiveSmall{}, \poolToneMeanUFourMathFiveSmall{}), and leads on greedy GSM8K at every $u$ (\poolGreedyGreedyUOneGsmSmall{}, \poolGreedyGreedyUTwoGsmSmall{} and \poolGreedyGreedyUFourGsmSmall{}; Table~\ref{tab:ablations}), driven by Qwen2.5-Math-1.5B. At $u \in \{64, 256\}$ both metrics fall behind (Appendix~\ref{sec:large-u}).
+
+\FloatBarrier
+\clearpage
+\section{Instruct models: no gain to find}
+\label{app:instruct}
+Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct are already RL-tuned for math reasoning, and TinyLoRA at $u \le 4$ leaves them almost nothing to gain. This appendix gives their detailed results and argues why, in this regime, \llmbo{} trails GRPO slightly: the pass rate carries too little signal for a search to establish that the base model is the best it can do, and gradient descent from $\theta = 0$ has an inductive bias towards staying there that BO lacks.
+
+\subsection{Results}
+\label{app:instruct-results}
+
+\begin{table}[!htbp]
+\centering
+\caption{Avg@4 (a) and greedy (b) accuracy at the end of training, for Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct (row blocks), per $u \le 16$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks); \llmbo{} is trained on the metric of each subtable (greedy: Section~\ref{sec:greedy-objective}). \emph{base}: accuracy of the base model in that metric (\%). \emph{GRPO}, \emph{\llmbo{}}: gain over the base model (points), mean over seeds (GRPO and avg@4-trained \llmbo{} 8 per cell at $u \le 4$ and 3 at $u = 8, 16$, greedy-trained \llmbo{} 3 per cell); bold: the larger, unless tied. $\Delta$: paired gap \llmbo{} $-$ GRPO, mean $\pm$ s.e.\ over the seed pairs both have, so it can differ from the difference of the two gains; tint: its sign and size (green: \llmbo{} ahead).}
+\label{tab:instruct}
+{\small (a) avg@4}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_instruct_avg4.tex}}\\[0.8em]
+{\small (b) greedy}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_instruct_greedy.tex}}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_scatter_instruct.pdf}
+\caption{Gain over the base model of \llmbo{} against GRPO's, in avg@4 and in greedy accuracy (color; greedy filled, avg@4 open), \llmbo{} trained on the metric of each point, for Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct (rows) on each benchmark (columns), each panel on its own axes. Training uses GSM8K and MATH: the left two columns are in-distribution, the four benchmarks right of the dotted line out-of-distribution. One point per $u \le 4$ (marker), mean $\pm$ s.e.\ over seeds. Points in the shaded half above the diagonal favor \llmbo{}; dashed: no gain.}
+\label{fig:scatter-instruct}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_gap_instruct.pdf}
+\caption{Paired gap \llmbo{} $-$ GRPO in avg@4 and in greedy accuracy (color), \llmbo{} trained on each metric, against $u \in \{1, \dots, 16\}$, mean $\pm$ s.e.\ over seed pairs, for Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct (rows), one column per benchmark (in-distribution GSM8K and MATH-500 first, then the four out-of-distribution benchmarks), each panel on its own gap axis. Solid, filled: $b = 1$ candidate per batch (the default); dashed, open: the $b = 4$ ablation.}
+\label{fig:gap-instruct}
+\end{figure}
+
+Under GRPO, avg@4 on GSM8K and MATH-500 moves by at most \grpoBestInstruct{} points at any $u \le 4$ (Table~\ref{tab:instruct}a), and the points of both optimizers cluster around zero gain (Figure~\ref{fig:scatter-instruct}). \llmbo{} is level with GRPO on GSM8K avg@4 on Qwen2.5-1.5B-Instruct (\gapToneMeanInstSmallUOneGsm{}, \gapToneMeanInstSmallUTwoGsm{}, \gapToneMeanInstSmallUFourGsm{} at $u = 1, 2, 4$) and trails slightly on MATH-500 avg@4: on Qwen2.5-7B-Instruct \gainToneMeanInstUOneMathFive{} and \gainToneMeanInstUFourMathFive{} points at $u = 1, 4$, against GRPO's \gainGrpoMeanInstUOneMathFive{} and \gainGrpoMeanInstUFourMathFive{}, and on Qwen2.5-1.5B-Instruct \gainToneMeanInstSmallUOneMathFive{} against \gainGrpoMeanInstSmallUOneMathFive{} at $u = 1$. In greedy accuracy (Table~\ref{tab:instruct}b, Figures~\ref{fig:scatter-instruct} and~\ref{fig:gap-instruct}) \llmbo{} stays within about half a point of GRPO on both models, except on Qwen2.5-7B-Instruct's MATH-500 at $u = 4$ (\gapGreedyGreedyInstUFourMathFive{}). GRPO's small gains are no larger than the noise of an evaluation, so the Instruct models only test whether an optimizer does harm when there is nothing to find. GRPO does essentially none; \llmbo{} does a little.
+
+\subsection{Too little signal to certify $\theta = 0$}
+\label{app:instruct-snr}
+
+\begin{table}[!htbp]
+\centering
+\caption{What the search sees and what it delivers, per \llmbo{} run at $u \le 4$ ($b = 1$, trained on the pass rate at $T = 1$), mean $\pm$ s.e.\ over seeds; Qwen2.5-7B, which TinyLoRA moves, for contrast. \emph{Training distribution}: the base model's sampled pass rate on the training tier, estimated from the eight $\theta = 0$ replicates of the search design; the standard error of one candidate's evaluation (one completion on each of $n = 256$ prompts), in points; \emph{GP gain}: the final GP's posterior mean at the returned adapter minus its posterior mean at $\theta = 0$, in pass-rate points, the improvement the search believes it found; $\|\theta\|_\infty / R$: how far out in the search box $[-R, R]^u$ the returned adapter lies. \emph{Held-out gain}: avg@4 accuracy on GSM8K and MATH-500 minus the base model's (points).}
+\label{tab:snr}
+\input{results/tab_snr.tex}
+\end{table}
+
+\paragraph{The noise of one evaluation exceeds the gain at stake.}
+\llmbo{} scores a candidate by one sampled completion on each of $n = 256$ training prompts. At the Instruct models' training pass rates the standard error of that estimate is \snrSemInstruct{} points (Table~\ref{tab:snr}); even the base model's rate, measured eight times in the initial design, is known only to $\pm$\snrReplicateSem{} points. Telling two adapters apart by $\delta$ at two standard errors of their difference takes about $8\sigma^2/\delta^2$ evaluations of each: \snrEvalsOne{} for $\delta = 1$ point and \snrEvalsHalf{} for $\delta = 0.5$. A search has about \snrTrials{} evaluations in all, spread over the search box. It therefore cannot establish that no adapter beats $\theta = 0$, the correct answer here: with a flat objective it can only return the trial whose posterior mean happens to be highest.
+
+\paragraph{The search fits noise.}
+Picking the best of a few hundred noisy evaluations is optimistic by construction (the winner's curse), and the GP removes only part of that bias. Its posterior believes the returned adapter improves the training pass rate in every row of Table~\ref{tab:snr}, by \snrBelievedInstUOne{} points on Qwen2.5-7B-Instruct at $u = 1$, rising to \snrBelievedInstUFour{} at $u = 4$ (\snrBelievedInstSmallUOne{} to \snrBelievedInstSmallUFour{} on Qwen2.5-1.5B-Instruct). On held-out MATH-500, the in-distribution benchmark of every training set, the same runs lose accuracy instead. The optimism grows with $u$: more dimensions hold more noise to fit, and the returned adapter moves further from the origin, from \snrThetaInstUOne{} of the box half-width at $u = 1$ to \snrThetaInstUFour{} at $u = 4$ on Qwen2.5-7B-Instruct, as held-out accuracy falls. The GP is not miscalibrated in general: on Qwen2.5-7B, whose pass rate TinyLoRA does move, its believed gains (\snrBelievedQwenUOne{} to \snrBelievedQwenUFour{} points at $u = 1, 4$) track the held-out gains of the same runs. The failure is specific to a regime where the true gain is below what the evaluation budget can resolve.
+
+\paragraph{Gradient descent is biased towards $\theta = 0$; BO is not.}
+GRPO starts at $\theta = 0$ and moves only as far as its gradient consistently pushes it. With Adam, a coordinate whose gradient keeps its sign moves about $\eta$ per step, up to $\eta S = R$ after $S$ steps, which is how we set the search box (Section~\ref{sec:method}). A gradient that is pure noise instead gives updates of random sign, correlated only over the momentum horizon, and for $\beta_1 = 0.9$ these add up to a random walk of about $\eta\sqrt{S}$, a fraction $1/\sqrt{S} \approx 0.05$ of the box after $S \approx 400$ steps. Without signal, GRPO thus stays close to the base model, as if under a prior concentrated at $\theta = 0$ with width shrinking as $1/\sqrt{S}$, and its held-out accuracy barely moves. \llmbo{} has no such prior: its Sobol designs and trust-region restarts cover the box uniformly, its GP has a constant prior mean, and $\theta = 0$ competes with every other evaluated point on equal terms, so on a flat objective the pick lands wherever the noise peaks. Where there is a gain to find, as on the models of Appendix~\ref{app:results}, this freedom is what lets \llmbo{} find it within the budget. Where there is none, it costs a fraction of a point.
+
+\paragraph{Remedies.}
+The bias is cheap to add to \llmbo{}: return $\theta = 0$ unless the posterior probability that the pick beats it is high, re-evaluate the final candidates against fresh $\theta = 0$ replicates before committing, or place a GP prior mean or a trust-region schedule that favors the origin. Each trades a little of the search's reach for safety on models with no headroom.
+
+\FloatBarrier
+\clearpage
+\section{Greedy accuracy: pooled gaps and training objective}
+\label{app:greedy}
+This appendix pools the greedy paired gaps of Section~\ref{sec:greedy-objective} over models (per model in Appendix~\ref{app:results}) and compares \llmbo{}'s two training objectives seed for seed.
+
+\subsection{Pooled over models}
+\label{app:greedy-pooled}
+
+\begin{table}[!htbp]
+\centering
+\caption{Paired gaps (points) per $u \le 4$, pooled over the six 7-8B base and math models and over the two Qwen2.5 1.5B models (row blocks; each model counted once), mean $\pm$ s.e.\ over seed pairs, in avg@4 and greedy accuracy (sub-columns), \llmbo{} trained on the metric of each column. Left: \llmbo{} $-$ GRPO; \emph{train tier}: greedy accuracy on up to 1024 problems of each model's training tier, the quantity \llmbo{} maximizes there (evaluated in greedy only). Right: the $b = 4$ ablation of \llmbo{} against $b = 1$ (Appendix~\ref{sec:parallel}). Tint: sign and size of the gap (green: the first term ahead).}
+\label{tab:ablations}
+\renewcommand{\arraystretch}{0.85}
+\resizebox{\linewidth}{!}{\input{results/tab_ablations.tex}}
+\end{table}
+
+Over the six 7-8B models \llmbo{} leads GRPO in greedy accuracy at every $u$ (Table~\ref{tab:ablations}): on greedy GSM8K by \poolGreedyGreedyUOneGsm{}, \poolGreedyGreedyUTwoGsm{} and \poolGreedyGreedyUFourGsm{} points at $u = 1, 2, 4$ and on greedy MATH-500 by \poolGreedyGreedyUOneMathFive{}, \poolGreedyGreedyUTwoMathFive{} and \poolGreedyGreedyUFourMathFive{}. On its own training problems its paired gap is small on the 7-8B models (\trainGapGreedyUOne{}, \trainGapGreedyUTwo{} and \trainGapGreedyUFour{} points) and large at 1.5B (\trainGapGreedyUTwoSmall{} at $u = 2$; Table~\ref{tab:ablations}), where its held-out gains are largest too: held-out gains appear where \llmbo{} optimizes its objective better.
+The lead is largest on the math-specialized models and at 1.5B (Appendices~\ref{sec:math} and~\ref{app:greedy-small}).
+
+\FloatBarrier
+\subsection{Training objective: greedy against $T = 1$}
+\label{app:objective}
+
+Everywhere else each metric is reported for \llmbo{} trained on it. Here we compare the two objectives directly. For each seed, \llmbo{} trained on greedy accuracy and \llmbo{} trained on the pass rate at $T = 1$ search the same TinyLoRA subspace (the SVD bases and random projections of the same GRPO seed), and both are evaluated greedily (Table~\ref{tab:objective}).
+At $u = 4$ training on greedy accuracy raises greedy accuracy in every model group: on greedy GSM8K by \objectiveUFourGsmBase{} points over the four vanilla base models, \objectiveUFourGsmMathVariants{} over the two math models and \objectiveUFourGsmSmall{} over the two 1.5B models, and on greedy MATH-500 by \objectiveUFourMathFiveBase{}, \objectiveUFourMathFiveMathVariants{} and \objectiveUFourMathFiveSmall{}. The difference is largest on Qwen2.5-Math-1.5B (\objectiveMathSmallUTwoGsm{} points on greedy GSM8K at $u = 2$), whose base model's repetition loop only the greedy objective sees (Appendix~\ref{app:greedy-small}). On Qwen2.5-7B the two objectives are level (\objectiveQwenUFourGsm{} on GSM8K, \objectiveQwenUFourMathFive{} on MATH-500 at $u = 4$).
+
+\begin{table}[!htbp]
+\centering
+\caption{Greedy accuracy at the end of training of \llmbo{} trained on the pass rate at $T{=}1$ (\emph{avg@4}) and on greedy accuracy (\emph{greedy}), the same 3 seeds per cell searching the same subspaces, for the four vanilla base models, the two math-specialized 7B models and the two Qwen2.5 1.5B models (row blocks), per $u \le 16$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks). \emph{base}: greedy accuracy of the base model (\%). \emph{avg@4}, \emph{greedy}: gain over the base model (points), mean over seeds; bold: the larger, unless tied. $\Delta$: paired gap of the greedy objective over the avg@4 one, mean $\pm$ s.e.\ over seed pairs; tint: its sign and size (green: the greedy objective ahead).}
+\label{tab:objective}
+\renewcommand{\arraystretch}{0.85}
+\resizebox{\linewidth}{!}{\input{results/tab_objective.tex}}
+\end{table}
+
+\FloatBarrier
+\clearpage
+\section{Sample efficiency, compute and memory}
+\label{app:efficiency}
+This appendix details the efficiency comparison of Section~\ref{sec:efficiency}: completions, compute and memory.
+
+\subsection{Sample efficiency}
+\label{sec:budget}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_budget.pdf}
+\caption{Gain of the current adapter over the base model, in greedy accuracy against training completions generated so far, on the two in-distribution tasks at $u \in \{1, 2, 4\}$ (columns), for every model (rows) trained on the SimpleRL-Zoo tiers, mean $\pm$ s.e. \llmbo{} ($b = 1$) is trained on greedy accuracy (Section~\ref{sec:greedy-objective}); its adapter at each point is its evaluated trial of highest posterior mean; its completions are counted from the end of its initial design. Dotted: GRPO at the end of training; gray dashed: the base model.}
+\label{fig:budget}
+\end{figure}
+
+We measure effort in generated training completions, independent of hardware: a median GRPO run generates \grpoCompletions{}, a median \llmbo{} run \boCompletions{} after its initial design (restart designs included).
+Figure~\ref{fig:budget} tracks the greedy gain over the base model along the way, against where GRPO ends.
+On the math-specialized models \llmbo{} gets there almost immediately: on Qwen2.5-Math-1.5B at $u = 2$ it passes GRPO's final accuracy with its first GP-guided batch, \reachGreedyMathSmallUTwoGsm{} completions, on both tasks, and ends \budgetEndGreedyMathSmallUTwoGsm{} (GSM8K) and \budgetEndGreedyMathSmallUTwoMathFive{} (MATH-500) points above it; on Qwen2.5-Math-7B at $u = 4$ it does the same on GSM8K and ends \budgetEndGreedyMathUFourGsm{} above. GRPO reaches its final accuracy only at the end of its run. Elsewhere the curves mostly stay within a couple of points of GRPO's final accuracy throughout. Trained on MATH alone (Figure~\ref{fig:budget-mathtrain}), \llmbo{} on Qwen2.5-Math-1.5B is ahead of GRPO's final accuracy from its first batch, \reachGreedyMathSmallUOneGsmMathTrain{} completions, in all six columns, and ends \budgetEndGreedyMathSmallUFourGsmMathTrain{} to \budgetEndGreedyMathSmallUTwoGsmMathTrain{} points above it on GSM8K and \budgetEndGreedyMathSmallUOneMathFiveMathTrain{} to \budgetEndGreedyMathSmallUTwoMathFiveMathTrain{} on MATH-500.
+\subsection{One completion per prompt}
+\label{sec:one-per-prompt}
+
+\begin{table}[!htbp]
+\centering
+\caption{Correlation between completions of the same prompt, per model, from GRPO's first \designSteps{} steps at $u \le 4$, close to the base model, at $T = 1$ on the training tier. \emph{Equal-reward groups}: groups of \grpoGroup{} completions of one prompt that all get the same reward, as observed and as expected if the completions were independent at the same pass rate; such groups give GRPO no gradient. $\rho$: intraclass correlation of the beta-binomial matching pass rate and observed equal-reward groups; $1 + 3\rho$: variance inflation of a pass-rate estimate from groups of \grpoGroup{} over one completion per prompt; $k_\mathrm{eff} = 4 / (1 + 3\rho)$: independent completions a group is worth.}
+\label{tab:design}
+\input{results/tab_design.tex}
+\end{table}
+
+\llmbo{} scores a candidate on one completion per prompt; GRPO samples a group of \grpoGroup{} per prompt for its baseline. For a fixed budget of $N$ completions, one per prompt gives the more precise estimate of the pass rate $p$. With $k$ completions on each of $N/k$ prompts, the estimate has variance
+\[
+\mathrm{Var}(\hat p) = \frac{p(1 - p)}{N}\,\bigl(1 + (k - 1)\rho\bigr), \qquad \rho = \frac{\mathrm{Var}_q(p_q)}{p(1 - p)},
+\]
+where $p_q$ is the pass rate on prompt $q$ and $\rho$ the correlation between two completions of the same prompt: the more prompts differ in difficulty, the less a second completion of the same prompt adds. The variance is smallest at $k = 1$, the binomial variance $p(1 - p)/N$ of independent completions; $k$ completions per prompt are worth $k / (1 + (k - 1)\rho)$ independent ones. One completion per prompt costs nothing extra here, since the training tiers hold thousands of prompts and \llmbo{} draws fresh ones for every candidate; repeating a prompt saves only its prefill, at most 512 of the 1536 tokens of a sequence.
+
+GRPO's logs measure $\rho$ for its groups of \grpoGroup{} (Table~\ref{tab:design}). Completions of the same prompt agree much more often than independent ones would, and most strongly on the models TinyLoRA moves: on the Qwen2.5 base and Math models a group of \grpoGroup{} is worth only \designEffectiveQwen{} independent completions, and on the Instruct models the variance inflation reaches \designEffectMax{}. On Llama3.1-8B, Mistral-7B and the DeepSeek models the pass rate on the training tier is low and the correlation weak, but there \designEqualOthers{}\% of GRPO's groups get the same reward for all \grpoGroup{} completions, so their advantages vanish and they give no gradient, at the full cost of generating and back-propagating them. \llmbo{} uses every completion: each one is on a fresh prompt and counts toward the pass rate.
+
+\subsection{Compute}
+\label{sec:compute}
+GRPO's \grpoPasses{} forward passes per token (Section~\ref{sec:efficiency}) are generation, rescoring for the old log-probabilities, and the forward and backward pass for the gradient, the backward pass counted as one since with frozen weights it only propagates activation gradients. The \boComputeShare{}\% counts \llmbo{}'s full run of \boCompletions{} completions against GRPO's \grpoCompletions{}.
+
+\subsection{Memory}
+\label{sec:cost}
+
+\begin{table}[!htbp]
+\centering
+\caption{Memory per architecture, pooling its models (DeepSeek-7B: the DeepSeek-Math-7B runs, same architecture); weights in bf16. \emph{Layers $\times$ KV heads}: the attention shape that sets the KV cache (head dimension 128 throughout); \emph{KV/seq.}: KV cache of one full-length sequence, 512 prompt + 1024 completion tokens. \emph{Beyond vLLM}: the working set $M$ a method allocates beyond the vLLM engine's reserve, median over runs (for GRPO, one micro-batch of \grpoMicroBatch{} sequences). \emph{Sequences in flight}: estimated full-length sequences a method keeps in flight on each card (\cardSmallGiB{}, \cardFortyGiB{}, \cardLargeGiB{} and \cardEightyGiB{}\,GiB usable). Bold: the better method; \ding{55}: fewer than \grpoMicroBatch{} sequences fit. Derivation and a worked example in the text.}
+\label{tab:memory}
+\footnotesize\setlength{\tabcolsep}{3pt}
+\resizebox{\textwidth}{!}{\input{results/tab_memory.tex}}
+\end{table}
+
+Both methods hold one copy of the weights, shared with the colocated inference engine, and need KV cache for the completions they generate. GRPO additionally holds logits, activations, gradients and optimizer state for its backward pass, which it runs on \grpoMicroBatch{} sequences at a time: \grpoOverheadSmall{}\,GiB on the 1.5B models and \grpoOverheadLarge{}\,GiB on the 7-8B ones (Table~\ref{tab:memory}). \llmbo{} allocates nothing measurable beyond inference; its GP lives on the CPU.
+
+The working-set columns of Table~\ref{tab:memory} derive from each run's peak allocation. Raw peaks are not comparable across methods: the colocated vLLM engine reserves a fixed share $s$ of a card of capacity $C$ up front, $s = 0.85$ for \llmbo{}, which has no training state, and $s = 0.5$ for GRPO ($0.45$ on 80\,GB cards), so \llmbo{}'s peak is the larger by construction. We therefore report the working set $M = \text{peak} - sC$, what a method allocates beyond the engine's reserve, which for a given model is nearly constant across card types. For \llmbo{}, $M$ comes out slightly negative, since the peak allocation misses the engine's CUDA graphs, and we report 0; the same omission makes GRPO's $M$ a slight underestimate, so the comparison favors GRPO.
+
+GRPO's $M$ is that of its micro-batch: it passes a step's completions forward and backward \grpoMicroBatch{} at a time (one prompt's group), accumulating gradients over the step's 64 prompts, so $M$ is the working set of \grpoMicroBatch{} sequences, the same on every card. The sequence columns are an estimate of how many sequences each method could keep in flight, assuming the working set grows linearly with the number of sequences, $M/\grpoMicroBatch{}$ per sequence (activations and logits are per sequence; the adapter's optimizer state is negligible). A card then holds
+\[
+n = \left\lfloor \frac{C - W - E}{L\,k + M/\grpoMicroBatch{}} \right\rfloor
+\]
+full-length sequences, with $W$ the weights, $E \approx \engineGiB{}$\,GiB the engine's activation and CUDA-graph overhead, $L = 1536$ tokens and $k$ the KV cache per token, $2 \times \text{layers} \times \text{KV heads} \times \text{head dim} \times 2$ bytes; for \llmbo{}, $M = 0$ and only the KV cache counts. For Qwen2.5-7B on a 24\,GB card ($C = \cardSmallGiB{}$\,GiB usable), $C - W - E = \memExampleFree{}$\,GiB and one sequence's KV cache takes $L\,k = \memExampleSeqMiB{}$\,MiB, so \llmbo{} holds \memExampleSeqs{} sequences; each GRPO sequence also needs $\grpoOverheadQwen{}/\grpoMicroBatch{} \approx \memExampleGrpoPerSeq{}$\,GiB of working set, so GRPO holds \memExampleGrpoSeqs{}, fewer than its micro-batch; we count fewer than \grpoMicroBatch{} sequences as not fitting. These counts assume the engine is given all the memory the method leaves free, and vLLM's paged cache fits more sequences when completions end early.
+
+Beyond the 24\,GB case of Section~\ref{sec:efficiency}, on a 48\,GB card \llmbo{} keeps \boSequenceRatio{} times as many sequences in flight as GRPO, that is, larger generation batches. DeepSeek-7B is the low end of both ranges: its GRPO working set is only \grpoOverheadDeepseek{}\,GiB, while its multi-head attention needs four times Llama's KV cache per token, so few sequences fit under either method.
+
+\FloatBarrier
+\clearpage
+\section{Batch size and parallelism}
+\label{sec:parallel}
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_budget_batch.pdf}
+\caption{Gain of the current adapter over the base model, in greedy accuracy against training completions generated so far, on the two in-distribution tasks at $u \in \{1, 2, 4\}$ (columns), pooled over the four 7-8B families and over the two Qwen2.5 1.5B models (rows; each model counted once), trained on the SimpleRL-Zoo tiers, mean $\pm$ s.e.: GRPO and \llmbo{} trained on greedy accuracy (Section~\ref{sec:greedy-objective}) with $b = 1$ (solid, filled) and $b = 4$ (dashed, open) candidates per batch. \llmbo{}'s adapter at each point is its evaluated trial of highest posterior mean, its completions counted from the end of its initial design. Dotted: GRPO at the end of training; gray dashed: the base model.}
+\label{fig:budget-batch}
+\end{figure}
+
+A candidate is $u$ numbers and its score a pass count, so the completions that score it can be generated on any number of devices with no synchronization beyond collecting the counts. The $b = 4$ ablation asks whether the same completions go further when spread over more candidates, four adapters on 64 prompts each instead of one on 256, which also makes the candidates of a batch independent jobs. At $u \le 4$ it costs at most about a point on either primary task (Table~\ref{tab:ablations}; at $u = 2$ \llmbo{} trained on avg@4 \batchFourToneMeanUTwoGsm{} on GSM8K avg@4 and \batchFourToneMeanUTwoMathFive{} on MATH-500 avg@4, \llmbo{} trained on greedy accuracy \batchFourGreedyGreedyUTwoGsm{} and \batchFourGreedyGreedyUTwoMathFive{} on greedy accuracy), and for \llmbo{} trained on avg@4 more from $u = 8$, where at $b = 4$ it trails GRPO by \gapBFourToneMeanQwenUEightGsm{} points on Qwen2.5-7B's GSM8K avg@4 (Figure~\ref{fig:gap-main}): the GP gains more from one precise score than from four noisy ones. The training-set evaluations show the noise directly: at $u \le 4$ the in-search score of \llmbo{}'s final pick exceeds the pick's accuracy on the whole training set by \searchBiasBFourTone{} points at $b = 4$ and \searchBiasTone{} at $b = 1$, over the \searchBiasModelsTone{} models evaluated at both (trained on greedy accuracy: \searchBiasBFourGreedy{} and \searchBiasGreedy{} over \searchBiasModelsGreedy{}), so a pick scored on 64 prompts is more often one that drew an easy minibatch. Nor do the extra candidates buy completion efficiency: along the way the $b = 4$ and $b = 1$ curves mostly cross back and forth within their errors, with no consistent edge for $b = 4$, and on the 7-8B models at $u = 4$ $b = 1$ ends ahead on both tasks (Figure~\ref{fig:budget-batch}). One candidate per batch is thus the completion-efficient choice, and $b = 4$ remains an option on hardware that favors independent jobs.
+
+\FloatBarrier
+\clearpage
+\section{Training data: SimpleRL-Zoo tiers against MATH alone}
+\label{app:shift}
+The SimpleRL-Zoo tiers do not match the distribution of MATH-500: the hard tier, on which the 7-8B models train, holds MATH levels 3-5 only, and the easy tier, on which the 1.5B models train, GSM8K and MATH level 1, while MATH-500 tests all five levels. The full MATH training set has the level and subject mix of MATH-500. Retraining the four Qwen2.5 base and Math models on it removes the shift and tests whether the gains of either optimizer, and \llmbo{}'s advantage over GRPO, depend on it. Figure~\ref{fig:shift} overlays the two training sets; Table~\ref{tab:shift} gives the MATH-only cells (the tier cells are in Appendices~\ref{app:results} and~\ref{app:small}). The cells on MATH alone carry as many seeds as their tier counterparts, 8 for GRPO and for \llmbo{} trained on avg@4 at $u \le 4$ (3 at $u = 8, 16$) and 3 for \llmbo{} trained on greedy accuracy, each \llmbo{} seed paired with the GRPO seed that shares its subspace.
+
+\subsection{avg@4}
+\label{app:shift-mean}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_shift.pdf}
+\caption{Gain over the base model in avg@4 (dashed) and in greedy accuracy (solid) against $u \le 4$, training on the SimpleRL-Zoo tiers (filled; hard tier at 7B, easy tier at 1.5B) and on MATH alone (open), the four Qwen2.5 base and Math models (rows), one column per benchmark (the two in-distribution tasks, then the four OOD benchmarks), each panel on its own scale; GRPO and \llmbo{} trained on the metric of each curve, mean $\pm$ s.e.\ over seeds.}
+\label{fig:shift}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering
+\caption{Avg@4 (a) and greedy (b) accuracy at the end of training on MATH alone, for the four Qwen2.5 base and Math models, 7B then 1.5B (row blocks), per $u \le 16$ (rows) and benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks); \llmbo{} is trained on the metric of each subtable (greedy: Section~\ref{sec:greedy-objective}). \emph{base}: accuracy of the base model in that metric (\%). \emph{GRPO}, \emph{\llmbo{}}: gain over the base model (points), mean over seeds (GRPO and avg@4-trained \llmbo{} 8 per cell at $u \le 4$ and 3 at $u = 8, 16$, greedy-trained \llmbo{} 3 per cell); bold: the larger, unless tied. $\Delta$: paired gap \llmbo{} $-$ GRPO, mean $\pm$ s.e.\ over the seed pairs both have, so it can differ from the difference of the two gains; tint: its sign and size (green: \llmbo{} ahead).}
+\label{tab:shift}
+{\small (a) avg@4}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_shift_avg4.tex}}\\[0.8em]
+{\small (b) greedy}\\[0.2em]
+\resizebox{\linewidth}{!}{\input{results/tab_shift_greedy.tex}}
+\end{table}
+
+Removing the shift moves neither optimizer much on MATH-500 (Figure~\ref{fig:shift}): on Qwen2.5-7B at $u = 4$ GRPO gains \gainGrpoMeanQwenUFourMathFive{} points on the tiers and \gainGrpoMeanQwenUFourMathFiveMathTrain{} on MATH alone, \llmbo{} \gainToneMeanQwenUFourMathFive{} and \gainToneMeanQwenUFourMathFiveMathTrain{}; elsewhere the two training sets mostly stay within each other's seed spread.
+Pooled over Qwen2.5-7B and Qwen2.5-Math-7B, \llmbo{}'s paired gap on MATH-500 avg@4 stays positive at every $u$ on MATH alone (\poolToneMeanUOneMathFiveShiftLargeMathTrain{}, \poolToneMeanUTwoMathFiveShiftLargeMathTrain{}, \poolToneMeanUFourMathFiveShiftLargeMathTrain{} at $u = 1, 2, 4$), as on the tiers (\poolToneMeanUOneMathFiveShiftLarge{}, \poolToneMeanUTwoMathFiveShiftLarge{}, \poolToneMeanUFourMathFiveShiftLarge{}), and so does its gap on GSM8K avg@4 (\poolToneMeanUOneGsmShiftLargeMathTrain{}, \poolToneMeanUTwoGsmShiftLargeMathTrain{}, \poolToneMeanUFourGsmShiftLargeMathTrain{}, against \poolToneMeanUOneGsmShiftLarge{}, \poolToneMeanUTwoGsmShiftLarge{}, \poolToneMeanUFourGsmShiftLarge{} on the tiers).
+Every difference between the two training sets is within two standard errors (at $u = 2, 4$: \shiftDeltaToneMeanUTwoMathFiveLarge{} and \shiftDeltaToneMeanUFourMathFiveLarge{} points on MATH-500, \shiftDeltaToneMeanUTwoGsmLarge{} and \shiftDeltaToneMeanUFourGsmLarge{} on GSM8K); the $b = 4$ ablation shows drops of the same size (\shiftDeltaBFourToneMeanUFourMathFiveLarge{} on MATH-500 and \shiftDeltaBFourToneMeanUFourGsmLarge{} on GSM8K at $u = 4$).
+Over Qwen2.5-1.5B and Qwen2.5-Math-1.5B, \llmbo{} is level with GRPO on both training sets: on MATH alone its paired gap on MATH-500 avg@4 is \poolToneMeanUOneMathFiveShiftSmallMathTrain{}, \poolToneMeanUTwoMathFiveShiftSmallMathTrain{} and \poolToneMeanUFourMathFiveShiftSmallMathTrain{} at $u = 1, 2, 4$ and on GSM8K avg@4, which this training set no longer contains, \poolToneMeanUOneGsmShiftSmallMathTrain{}, \poolToneMeanUTwoGsmShiftSmallMathTrain{} and \poolToneMeanUFourGsmShiftSmallMathTrain{}.
+
+\FloatBarrier
+\subsection{Greedy accuracy}
+\label{app:shift-greedy}
+
+Trained on MATH alone, \llmbo{}'s paired gap on greedy MATH-500, pooled over Qwen2.5-7B and Qwen2.5-Math-7B, is \poolGreedyGreedyUOneMathFiveShiftLargeMathTrain{}, \poolGreedyGreedyUTwoMathFiveShiftLargeMathTrain{} and \poolGreedyGreedyUFourMathFiveShiftLargeMathTrain{} at $u = 1, 2, 4$, against \poolGreedyGreedyUOneMathFiveShiftLarge{}, \poolGreedyGreedyUTwoMathFiveShiftLarge{} and \poolGreedyGreedyUFourMathFiveShiftLarge{} on the tiers, and on greedy GSM8K it stays positive at every $u$ (\poolGreedyGreedyUOneGsmShiftLargeMathTrain{}, \poolGreedyGreedyUTwoGsmShiftLargeMathTrain{}, \poolGreedyGreedyUFourGsmShiftLargeMathTrain{}).
+At 1.5B its lead on greedy MATH-500 holds or grows, to \poolGreedyGreedyUOneMathFiveShiftSmallMathTrain{}, \poolGreedyGreedyUTwoMathFiveShiftSmallMathTrain{} and \poolGreedyGreedyUFourMathFiveShiftSmallMathTrain{} points at $u = 1, 2, 4$ over Qwen2.5-1.5B and Qwen2.5-Math-1.5B, from \poolGreedyGreedyUOneMathFiveShiftSmall{}, \poolGreedyGreedyUTwoMathFiveShiftSmall{} and \poolGreedyGreedyUFourMathFiveShiftSmall{} on the tiers, and on greedy GSM8K it leads by \poolGreedyGreedyUOneGsmShiftSmallMathTrain{}, \poolGreedyGreedyUTwoGsmShiftSmallMathTrain{} and \poolGreedyGreedyUFourGsmShiftSmallMathTrain{}. The completion budget of \llmbo{} on MATH alone is in Figure~\ref{fig:budget-mathtrain}.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_budget_mathtrain.pdf}
+\caption{Gain of the current adapter over the base model, in greedy accuracy against training completions generated so far, on the two in-distribution tasks at $u \in \{1, 2, 4\}$ (columns), for the four Qwen2.5 base and Math models (rows) trained on the SimpleRL-Zoo tiers (solid, filled) and on MATH alone (dashed, open), mean $\pm$ s.e., for GRPO and for \llmbo{} ($b = 1$) trained on greedy accuracy (Section~\ref{sec:greedy-objective}). \llmbo{}'s adapter at each point is its evaluated trial of highest posterior mean, its completions counted from the end of its initial design. Gray dashed: the base model.}
+\label{fig:budget-mathtrain}
+\end{figure}
+
+\FloatBarrier
+The level shift therefore does not explain \llmbo{}'s advantage: with the training set matched to MATH-500, both optimizers gain about as much as on the tiers, and \llmbo{}'s lead on the 7B models persists at every $u$, within seed noise of its lead on the tiers.
+
+\FloatBarrier
+\clearpage
+\section{TinyLoRA under GRPO across the parameter scale}
+\label{app:scaling}
+This appendix details how we parameterize and scale TinyLoRA, where this departs from \citet{morris2026learning} and why the departure leaves the comparison of \llmbo{} with GRPO unaffected, and how TinyLoRA trained with GRPO compares with LoRA and LoRA-XS from one trainable parameter to tens of millions.
+
+\subsection{Parameterization}
+\label{app:param}
+We adapt $M$ modules, every attention and MLP projection (query, key, value, output, gate, up, down) of every layer: $M = 196$ on the Qwen2.5 models, $210$ on the DeepSeek models and $224$ on Llama3.1-8B and Mistral-7B. Module $m$ has a frozen weight $W_m$ with rank-$r$ truncated SVD $U_m \Sigma_m V_m^\top$, computed in fp32 from the bf16 weight, and receives the LoRA-XS update \citep{balazy2024loraxs}
+\begin{equation}
+    \Delta W_m = U_m \Sigma_m R_m V_m^\top, \qquad R_m \in \mbR^{r \times r}.
+\end{equation}
+LoRA-XS trains every $R_m$ directly, $M r^2$ parameters in all. TinyLoRA instead writes each $R_m$ as a combination of $u$ fixed random matrices,
+\begin{equation}
+    R_m = \sum_{i=1}^{u} v_i P^{(m)}_i, \qquad P^{(m)}_i \in \mbR^{r \times r}, \qquad \big[P^{(m)}_i\big]_{jk} \overset{\text{iid}}{\sim} \mcN(0, 1),
+    \label{eq:app-tinylora}
+\end{equation}
+with one coefficient vector $v \in \mbR^u$ shared by all $M$ modules, so the adapter has exactly $u$ trainable parameters and we search $\theta = v$. Throughout, $r = 2$, the rank \citet{morris2026learning} use for their main experiments.
+
+\paragraph{Sampling.}
+The projections are drawn independently for every module and every $i$, from a generator seeded with the run's seed, as one $u \times r \times r$ tensor per module in network order (layer by layer, the seven projections in the order above). \llmbo{} seed $k$ rebuilds exactly the SVD bases and projections of GRPO seed $k$, so both optimizers search the same subspace in the same coordinates. Different seeds draw independent subspaces; different $u$ draw unrelated ones, since every module's tensor changes shape: the subspace at $u = 2$ does not contain the one at $u = 1$. \citet{morris2026learning} specify neither the distribution of the projections nor whether they are shared across modules; independence across modules is what makes $u > r^2$ useful under full tying (Section~\ref{app:tying}).
+
+\paragraph{Initialization and step size.}
+$v$ starts at zero, so $\Delta W_m = 0$ and $\theta = 0$ is the base model; \citet{morris2026learning} do not state an initialization. Instead of their learning-rate sweep, we fix the learning rate by equal update norm: Adam moves each coordinate of $v$ by about $\eta$ per step, and $\|P^{(m)}_i\|_F \approx r$, so a step changes each $R_m$ by $\|\Delta R_m\|_F \approx \eta r \sqrt{u}$. We set $\eta = 10^{-3} / (r \sqrt{u})$, a fixed $\|\Delta R_m\|_F \approx 10^{-3}$ per step at every $u$, and LoRA-XS, whose coordinates are the entries of $R_m$, gets $\eta = 10^{-3}/r$ by the same rule. Since TinyLoRA and LoRA-XS share the frozen $U_m$, $\Sigma_m$, $V_m$, equal $\|\Delta R_m\|_F$ is equal speed in weight space. The same $\eta$ fixes \llmbo{}'s search box $[-\eta S, \eta S]^u$ (Section~\ref{sec:method}).
+
+\paragraph{Reference adapters.}
+LoRA \citep{hu2022lora} trains $r(d_\mathrm{in} + d_\mathrm{out})$ parameters per module, about 2.5M at $r = 1$ and 81M at $r = 32$ on Qwen2.5-7B, with $\alpha = 2r$, the PEFT initialization ($A$ random, $B = 0$) and $\eta = 5 \cdot 10^{-6}$. LoRA-XS trains $M r^2$ parameters, 196 at $r = 1$ to about 200k at $r = 32$ on Qwen2.5-7B, with $R_m = 0$ at the start. All three adapters train under the same GRPO recipe (Section~\ref{sec:experiments}).
+
+\subsection{Weight tying: the original scheme and ours}
+\label{app:tying}
+
+\paragraph{The original scheme.}
+\citet{morris2026learning} give each module, or each group of $n_\mathrm{tie}$ modules, its own vector $v_g \in \mbR^u$, for $M u / n_\mathrm{tie}$ trainable parameters in all. Groups are either \emph{tiled}, nearby modules of similar depth regardless of type, or \emph{structured}, nearby modules of the same type, and tiling works better. A parameter count is reached by trading the projection dimension $u$ against the tying factor $n_\mathrm{tie}$, and their guideline is to lower $u$ (down to 1) before raising $n_\mathrm{tie}$. Scaling TinyLoRA thus spans a two-dimensional grid of configurations, with a grouping rule on top.
+
+\paragraph{Both schemes are linear subspaces of LoRA-XS.}
+Stack the per-module matrices into $\rho = (\mathrm{vec}\, R_1, \dots, \mathrm{vec}\, R_M) \in \mbR^{M r^2}$, the parameter space of LoRA-XS. Every TinyLoRA configuration with $N$ trainable parameters is a fixed linear map
+\begin{equation}
+    \rho = \Phi \theta, \qquad \Phi \in \mbR^{M r^2 \times N}, \qquad \theta \in \mbR^N.
+\end{equation}
+With tying in groups, $\theta = (v_1, \dots, v_{M/n_\mathrm{tie}})$ and $\Phi$ is block-sparse: the rows of module $m$ are nonzero only in the $u$ columns of its group, which hold its projections $\mathrm{vec}\, P^{(m)}_i$. With full tying ($n_\mathrm{tie} = M$), $N = u$ and $\Phi$ is dense, every entry an independent standard normal. In either case, as long as $\Phi$ has full column rank, which holds almost surely for $N \le M r^2$ (and $u \le n_\mathrm{tie} r^2$ under grouping), the adapters TinyLoRA can express form an $N$-dimensional linear subspace of the LoRA-XS space, and the two schemes differ only in \emph{which} $N$-dimensional subspace: one aligned with a grouping of the modules, or the column space of a Gaussian matrix, a uniformly random subspace in the spirit of intrinsic-dimension fine-tuning \citep{aghajanyan2021intrinsic}. With enough parameters the distinction vanishes: at $N = M r^2$ both span the whole LoRA-XS space, and untied TinyLoRA with $u = r^2$ is LoRA-XS with a random basis for each $R_m$. Below that, full tying already reaches every count $N \le M r^2$ through $u$ alone, so the second axis, $n_\mathrm{tie}$, and the grouping rule only choose among subspaces of equal dimension. Full tying also needs projections drawn independently per module: with the same $P_i$ in every module, all $R_m$ would coincide and the subspace would stop growing at $u = r^2$.
+
+\paragraph{Our scheme.}
+We therefore fix full tying and scale TinyLoRA along the single axis $u \in \{1, 2, 4, 8, 16, 64, 256\}$, with $N = u$. This is the original scheme's $n_\mathrm{tie} = M$ setting, extended past $u = r^2$ by independent per-module projections, and it stays well inside the regime of distinct directions: $u \le 256 < 784 \le M r^2$ on every model. It is also well conditioned: each column of $\Phi$ has norm about $r\sqrt{M}$, and two columns have cosine of order $1/(r\sqrt{M}) \approx 0.04$ at $M = 196$, so every coordinate of $v$ moves the network by about the same amount along a nearly orthogonal direction, at every $u$.
+
+\paragraph{What the deviation does and does not change.}
+Equal dimension is not equal performance: the subspace differs, and both optimizers depend on the coordinates, Adam through its per-coordinate steps and \llmbo{} through its search box and per-dimension lengthscales. Our TinyLoRA accuracies at a given parameter count therefore need not match those of the best $(u, n_\mathrm{tie})$ configuration and learning rate of \citet{morris2026learning}, and we do not claim they do. The deviation does not affect our analysis, however: GRPO and \llmbo{} run on the same $\Phi$, seed for seed, so they search the same subspace in the same coordinates and differ only in the optimizer. The choice of tying only fixes a simple, one-axis scaling protocol, in which the parameter count, the search dimension and the subspace dimension are all $u$.
+
+\subsection{Results}
+\label{app:scaling-results}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{results/fig_scaling_all.pdf}
+\caption{Greedy (solid) and avg@4 (dashed) accuracy at the end of training against trainable parameters under GRPO, for every model (rows, in three blocks: the one 7-8B base model per family; the two math-specialized 7B models; Qwen2.5-7B-Instruct and the Qwen2.5 1.5B models, which train on the easy tier), on each benchmark (columns: in-distribution GSM8K and MATH-500, then the four out-of-distribution benchmarks right of the dotted line), each panel on its own accuracy axis: LoRA and LoRA-XS at $r \in \{1,2,8,32\}$, TinyLoRA at $u \in \{1,\dots,256\}$. Gray: the base model, in the same line style. Mean $\pm$ s.e.\ over seeds.}
+\label{fig:scaling-base}
+\end{figure}
+
+Figure~\ref{fig:scaling-base} places TinyLoRA among the larger adapters, all trained with GRPO, on every model, in avg@4 and in greedy accuracy, on the two in-distribution tasks and the four out-of-distribution benchmarks. The OOD benchmarks follow the in-distribution tasks at smaller magnitude and with more noise, as expected from 30-675 problems each.
+
+\paragraph{Base models across families.}
+On Qwen2.5-7B TinyLoRA retains a large part of LoRA's avg@4 gain down to a few parameters; greedy accuracy starts higher and has less to gain. On Llama3.1-8B, Mistral-7B and DeepSeek-7B, TinyLoRA at $u \le 4$ moves accuracy by at most \othersTinyBest{} points on either primary task. On Llama3.1-8B and Mistral-7B LoRA at rank 32 still gains \loraGainGreedyLlamaMathFive{} and \loraGainGreedyMistralMathFive{} points on greedy MATH-500 and \loraGainGreedyLlamaGsm{} and \loraGainGreedyMistralGsm{} on greedy GSM8K: for these families a useful direction is apparently not in TinyLoRA's random subspace. DeepSeek-7B moves little under LoRA as well (\loraGainGreedyDeepseekBaseMathFive{} and \loraGainGreedyDeepseekBaseGsm{} points).
+
+\paragraph{Math variants.}
+On Qwen2.5-Math-7B, as on Qwen2.5-7B, TinyLoRA retains a large part of LoRA's avg@4 gain down to a few parameters, with GRPO gaining up to \gainGrpoMeanMathUFourMathFive{} points on MATH-500 avg@4 at $u = 4$; on DeepSeek-Math-7B, as on the other non-Qwen models, it moves accuracy little.
+
+\paragraph{Qwen2.5 Instruct models.}
+Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct leave little to gain in the ultra-low-parameter regime: GRPO moves their avg@4 on GSM8K and MATH-500 by at most \grpoBestInstruct{} points at $u \le 4$ (Appendix~\ref{app:instruct}).
+
+\FloatBarrier
+\clearpage
+\section{Implementation details}
+\label{app:impl}
+This appendix collects the settings of both optimizers, the evaluation harness, the compute used, and the licenses of the assets, then details \llmbo{}'s search, its observation model, how we keep the frozen SVD bases identical across GPU models, and the one change we make to the standard GRPO loss. All are implemented in the anonymized code in the supplementary material.
+
+\subsection{Hyperparameters}
+\label{app:hparams}
+
+\begin{table}[!htbp]
+\centering
+\caption{Settings of both optimizers. $N$: prompts in the training set; $S$: GRPO's optimizer steps; $s$ of $n$: a candidate's solved prompts.}
+\label{tab:hparams}
+\small
+\begin{tabular}{@{}lp{0.66\linewidth}@{}}
+\toprule
+\multicolumn{2}{@{}l}{\emph{Shared}} \\
+Adapter & TinyLoRA, $r = 2$, one $v \in \mbR^u$ tied across all $M$ modules (Appendix~\ref{app:param}) \\
+Prompt / completion length & 512 / 1024 tokens \\
+Completions per step or batch & 256 \\
+Reward & 1 if math-verify finds the final answer equivalent to the reference, else 0 \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{GRPO}} \\
+Prompts $\times$ rollouts per step & $64 \times 4$, at $T = 1$ \\
+Steps $S$ & $3 \lceil N / 64 \rceil$ (three epochs) \\
+Loss & token-level clipped objective, $\epsilon = 0.2$, dual clip $\delta = 2$, no KL penalty \\
+Optimizer & 8-bit AdamW, constant learning rate after 10 warm-up steps, gradient-norm clip 1 \\
+Learning rate $\eta$ & $10^{-3}/(r\sqrt{u})$ TinyLoRA, $10^{-3}/r$ LoRA-XS, $5 \cdot 10^{-6}$ LoRA ($\alpha = 2r$) \\
+Micro-batch & 4 sequences (one prompt's group), gradients accumulated over the step's 64 prompts \\
+\midrule
+\multicolumn{2}{@{}l}{\emph{\llmbo{}}} \\
+Candidates per batch $b$ & 1 (ablation: 4) \\
+Prompts per candidate $n$ & $256 / b$, fresh random prompts, one completion each \\
+Objective & pass rate at $T = 1$ (for avg@4) or greedy (for greedy accuracy) \\
+Batches & $S$ GP-guided, plus the initial and restart designs \\
+Initial / restart design & 8 replicates of $\theta = 0$ and 8 Sobol points / 8 Sobol points \\
+Search box & $[-\eta S, \eta S]^u$, with GRPO's TinyLoRA $\eta$ and $S$ \\
+Observation & logit of the $\mathrm{Beta}(1 + s, 1 + n - s)$ posterior: digamma mean, trigamma variance \\
+GP & Mat\'ern 5/2, one lengthscale per dimension, fixed per-trial noise plus a learned floor, MAP fit \\
+Lengthscale prior & $\mathrm{LogNormal}(\sqrt{2} + \log(L\sqrt{u}), \sqrt{3})$ \\
+Trust region & side $L$ from 0.8, at most 1.6; doubled after 3 successes, halved after $\lceil \max(4, u)/b \rceil$ failures; restart below $0.5^7$ \\
+Acquisition & Thompson sampling over $\min(5000, \max(2000, 200u))$ Sobol candidates in the region \\
+GP data & every trial since the trust region started, plus the $\theta = 0$ replicates \\
+Incumbent and output & the evaluated trial of highest posterior mean, also the trust-region center \\
+Scoring & the $b$ candidates of a batch in one vLLM call, each a rank-$r$ LoRA with $B = U\Sigma\sum_i v_i P_i$, $A = V^\top$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:hparams} collects the settings of Sections~\ref{sec:method} and~\ref{sec:experiments} and Appendix~\ref{app:param}. On the SimpleRL-Zoo tiers $S \approx 390$-$400$.
+
+\subsection{Evaluation harness}
+\label{app:harness}
+
+Every model is prompted with its SimpleRL-Zoo template: a plain question-answer template for Qwen2.5-1.5B, Llama3.1-8B and Mistral-7B, and for every other model the ChatML template that asks to reason step by step and put the final answer within \verb|\boxed{}|. vLLM \citep{kwon2023vllm} generates up to 1024 tokens, greedily for greedy accuracy and four samples at $T = 1$ for avg@4. math-verify (0.9.0) extracts the final answer, the last \verb|\boxed{}| of the completion or else its last mathematical expression, and checks it for symbolic or numeric equivalence with the reference answer; a completion with no answer, or whose grading times out, counts as wrong. Training rewards and every evaluation, of the base models included, use this one grader. The benchmarks are MATH-500 (500 problems), GSM8K (1319), AIME24 (30), AMC23 (40), Minerva Math (272) and OlympiadBench (675).
+
+\subsection{Compute}
+\label{app:infra}
+
+Every run, of either optimizer, uses one GPU of a shared cluster, scheduled on whichever card was free: NVIDIA L40S (48\,GB), A100 (40 and 80\,GB), A40, A16, H100, L4 and RTX A4000. The \nModels{} models take over 14k GPU-hours of training (logged hours undercount runs resumed after preemption), plus evaluation. Since the two runs of a seed pair mostly ran on different cards (84 of the 336 avg@4 pairs at $b = 1$ share one), Section~\ref{sec:efficiency} compares FLOPs rather than wall-clock time.
+
+\subsection{Licenses}
+\label{app:licenses}
+
+Models: the Qwen2.5 and Qwen2.5-Math models used here and Mistral-7B are released under Apache 2.0, Llama3.1-8B under the Llama 3.1 Community License, and DeepSeek-7B and DeepSeek-Math-7B under the DeepSeek Model License. Data: MATH, GSM8K and MATH-500 (from PRM800K) are MIT-licensed; the SimpleRL-Zoo tiers are drawn from MATH and GSM8K and released under Apache 2.0. OlympiadBench is MIT-licensed, and Minerva Math consists of MIT OpenCourseWare problems (CC BY-NC-SA 4.0). AIME24 and AMC23 are competition problems of the Mathematical Association of America; the AIME24 copy we use is released under Apache 2.0, the AMC23 copy carries no license, and both serve for evaluation only. Software: vLLM, TRL and Unsloth are Apache 2.0, BoTorch and GPyTorch MIT, and math-verify Apache 2.0.
+
+
+\subsection{Observation model}
+\label{app:obsmodel}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{results/fig_obsmodel.pdf}
+\caption{The Gaussian observation a GP receives for a candidate that solves $s$ of $n = 256$ prompts, against the $\mathrm{Beta}(1 + s, 1 + n - s)$ posterior on its pass rate. \emph{Top}: a Gaussian on the rate with the plug-in binomial variance, each in pass-rate space. \emph{Bottom}: \llmbo{}'s Gaussian with the exact mean $y$ and variance $\sigma^2$ of the posterior's logit (Section~\ref{sec:method}), in logit space, the space the GP models.}
+\label{fig:obsmodel}
+\end{figure}
+
+A candidate's score is a count, $s$ solved prompts out of $n$, whereas a GP with a closed-form posterior needs a Gaussian observation. The common choice, the rate $\hat p = s/n$ with the plug-in binomial variance $\hat p(1 - \hat p)/n$, fails where it matters most for us (Figure~\ref{fig:obsmodel}, top). Near a pass rate of 0 or 1, where the Instruct models train, the binomial posterior is skewed and the symmetric Gaussian misplaces its mass, and at $s = 0$ or $s = n$ the variance vanishes: the GP would treat one noisy evaluation as exact. A Gaussian on the rate also leaves the GP free to predict rates outside $[0, 1]$.
+
+\llmbo{} instead matches a Gaussian to the logit of the Beta posterior (Figure~\ref{fig:obsmodel}, bottom). On the logit scale the posterior is close to Gaussian over the whole range of rates; at $s = 0$ it is skewed, but its variance stays finite and grows as the rate approaches the boundary, so an all-fail or all-pass evaluation reads as weak evidence rather than as certainty. The uniform prior keeps both shape parameters at least 1, which limits this skew; under the Jeffreys prior, with $\alpha = \frac12$ at $s = 0$, it is much stronger. The GP thus models an unbounded quantity with a known noise per trial, inside a stock fixed-noise GP whose Thompson samples stay exact. The construction is the one of Dirichlet-based GP classification \citep{milios2018dirichlet} and of Laplace Matching \citep{hobbhahn2021laplace}, which feed Gamma and Beta pseudo-observations to a GP as heteroscedastic Gaussians in a transformed space; we use the exact moments of the logit, $\psi(\alpha) - \psi(\beta)$ and $\psi_1(\alpha) + \psi_1(\beta)$, rather than those of a Laplace approximation. A latent GP with an exact binomial likelihood would avoid the approximation altogether but loses the closed-form posterior, and with it exact Thompson sampling, for a gain the figure shows to be small at $n = 256$.
+
+\subsection{SVD bases across GPU models}
+\label{app:svd-signs}
+
+\paragraph{The truncated SVD is defined only up to signs.}
+TinyLoRA and LoRA-XS build every module's update on the frozen factors of its rank-$r$ truncated SVD, $\Delta W_m = U_m \Sigma_m R_m V_m^\top$ (Appendix~\ref{app:param}). For distinct singular values, these factors are unique only up to a joint sign flip of each singular pair $(u_i, v_i) \mapsto (-u_i, -v_i)$, and which sign a solver returns is an implementation detail. On our cluster, \texttt{torch.linalg.svd} in fp32 picks different signs on different GPU models. We computed the leading two singular pairs of the seven layer-0 projections of the six Qwen2.5 models on six GPU models: A100-PCIe-40GB and A100-SXM4-80GB agree exactly, and any two of the remaining five (A100, A40, H100, L4, L40S) disagree on the sign of 6 to 13 of the 84 singular vectors, 7-15\%, while the factors agree to within $4 \cdot 10^{-3}$ once the signs are aligned.
+
+\paragraph{A sign flip changes TinyLoRA's subspace.}
+Write the signs one solver picks relative to another as a diagonal matrix $D_m \in \{\pm 1\}^{r \times r}$, so that it returns $U_m D_m$ and $V_m D_m$. Since $D_m$ commutes with $\Sigma_m$,
+\begin{equation}
+    U_m D_m \Sigma_m R_m (V_m D_m)^\top = U_m \Sigma_m (D_m R_m D_m) V_m^\top,
+\end{equation}
+so the second solver's adapter with coefficients $R_m$ is the first solver's with $D_m R_m D_m$; at $r = 2$, a flip of one of the two pairs negates the off-diagonal entries of $R_m$. For LoRA-XS this is a change of coordinates, the set of reachable updates is unchanged, although a trained $R_m$ must still be read with the bases it was trained in. For TinyLoRA it is not: with $R_m = \sum_i v_i P^{(m)}_i$, the flipped solver yields the projections $D_m P^{(m)}_i D_m$, with $D_m$ differing between modules, and so a different $u$-dimensional subspace of the LoRA-XS space for every $u < M r^2$ (Appendix~\ref{app:tying}). Its distribution is the same, but seed $k$ on one card model is not seed $k$ on another. Left alone, this would silently break three things: the seed pairing of \llmbo{} and GRPO whenever the two runs land on different card models, a run preempted and requeued onto a different card model, which would continue in a different subspace from the same $v$, and the evaluation of an exported adapter.
+
+\paragraph{Pinning the bases.}
+We compute the SVD once, in the GRPO run of each seed, and store $V_m^\top$ as the adapter's LoRA $A$ matrix, which the exported adapter holds anyway. \llmbo{}'s search, resumed runs and the evaluation rebuild the remaining factors from the stored $V_m$ and the frozen weight alone: $\Sigma_m$ from the column norms of $W_m V_m$ and $U_m = W_m V_m \Sigma_m^{-1}$. Because $\sigma_i u_i = W_m v_i$, the sign of each $u_i$ follows from that of $v_i$, and the bases are identical, up to floating-point error, on any hardware.
+
+\subsection{A bounded GRPO loss}
+\label{app:dual-clip}
+
+On the base models, a few TinyLoRA runs under the standard clipped GRPO loss diverged: the pre-clipping gradient norm spiked to $10^2$-$10^{11}$, after which the reward fell to zero and did not recover (Qwen2.5-7B at $u = 64$, training reward from 0.59 to 0.01; Qwen2.5-Math-7B at $u = 16$, GSM8K accuracy from 82\% to 40\%). Plain LoRA and the Instruct models were never affected.
+
+The cause is a known gap in the clipped objective. Each GRPO step takes one optimizer step on its rollouts, so $\pi_{\theta_\mathrm{old}} = \pi_\theta$ and the ratio $\rho_{j,t}$ is 1 in exact arithmetic. The old log-probabilities, however, come from a separate bf16 forward pass, so $\rho_{j,t}$ carries numerical noise that can reach several nats on low-probability tokens. For a token with $A_j < 0$ and $\rho_{j,t} > 1 + \epsilon$, the minimum in the GRPO objective selects the unclipped term $\rho_{j,t} A_j$, and the loss $\rho_{j,t} |A_j|$ is unbounded: a single noisy token can dominate the gradient. Gradient-norm clipping bounds the step size but not its direction, and TinyLoRA's tied $v$ then moves every module at once. On a base model, a perturbed policy soon produces completions that run past the token limit, every reward in a group becomes zero, and no signal is left to recover from.
+
+We therefore use the dual clip of \citet{ye2020mastering}, which bounds the objective of negative-advantage tokens from below by $\delta A_j$ with $\delta = 2$:
+\begin{equation}
+    \max\!\big( \min\!\big( \rho_{j,t} A_j,\ \mathrm{clip}(\rho_{j,t}, 1 - \epsilon, 1 + \epsilon) A_j \big),\ \delta A_j \big) \quad \text{for } A_j < 0.
+\end{equation}
+It changes the loss only of tokens with $\rho_{j,t} > \delta$, which in a healthy run, where the ratio departs from 1 only by numerical noise, are rare. With it, the largest gradient norm of these runs stays below 5 throughout training.
+
+\end{document}

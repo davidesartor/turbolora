@@ -1,0 +1,17 @@
+\begin{tabular}{c l cccccc@{\hspace{1.2em}}cccccccccccc}
+\toprule
+ & & \multicolumn{6}{c}{in-distribution} & \multicolumn{12}{c}{out-of-distribution} \\
+\cmidrule(lr){3-8}\cmidrule(lr){9-20}
+ & & \multicolumn{3}{c}{GSM8K} & \multicolumn{3}{c}{MATH-500} & \multicolumn{3}{c}{AIME24} & \multicolumn{3}{c}{AMC23} & \multicolumn{3}{c}{Minerva} & \multicolumn{3}{c}{Olympiad} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}\cmidrule(lr){12-14}\cmidrule(lr){15-17}\cmidrule(lr){18-20}
+ & $u$ & GRPO & LlMBO & $\Delta$ & GRPO & LlMBO & $\Delta$ & GRPO & LlMBO & $\Delta$ & GRPO & LlMBO & $\Delta$ & GRPO & LlMBO & $\Delta$ & GRPO & LlMBO & $\Delta$ \\
+\midrule
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/qwen.png}}~Qwen2.5-7B & base & \multicolumn{3}{c}{88.0} & \multicolumn{3}{c}{64.0} & \multicolumn{3}{c}{0.0} & \multicolumn{3}{c}{30.0} & \multicolumn{3}{c}{32.7} & \multicolumn{3}{c}{28.6} \\
+ & 64 & \textbf{\boldmath $+1.0$} & $-3.5$ & \gapchip{red!28}{$-4.4$\,{\scriptsize$\pm$1.8}} & \textbf{\boldmath $+4.0$} & $+1.5$ & \gapchip{red!28}{$-2.5$\,{\scriptsize$\pm$2.7}} & $+5.6$ & $+5.6$ & \gapchip{none}{$+0.0$\,{\scriptsize$\pm$1.9}} & $+4.2$ & \textbf{\boldmath $+6.7$} & \gapchip{green!28}{$+2.5$\,{\scriptsize$\pm$1.4}} & \textbf{\boldmath $+3.2$} & $-5.3$ & \gapchip{red!28}{$-8.5$\,{\scriptsize$\pm$0.6}} & \textbf{\boldmath $+2.1$} & $+1.2$ & \gapchip{red!12}{$-0.8$\,{\scriptsize$\pm$1.8}} \\
+ & 256 & \textbf{\boldmath $+0.2$} & $-1.4$ & \gapchip{red!23}{$-1.7$\,{\scriptsize$\pm$1.3}} & $+3.1$ & \textbf{\boldmath $+3.9$} & \gapchip{green!12}{$+0.9$\,{\scriptsize$\pm$1.3}} & $+3.3$ & \textbf{\boldmath $+6.7$} & \gapchip{green!28}{$+3.3$\,{\scriptsize$\pm$1.9}} & $+1.7$ & \textbf{\boldmath $+10.0$} & \gapchip{green!28}{$+8.3$\,{\scriptsize$\pm$3.0}} & \textbf{\boldmath $+2.3$} & $-2.9$ & \gapchip{red!28}{$-5.3$\,{\scriptsize$\pm$2.9}} & \textbf{\boldmath $+3.4$} & $+2.8$ & \gapchip{red!8}{$-0.5$\,{\scriptsize$\pm$1.2}} \\
+\midrule
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/qwen.png}}~Qwen2.5-Math-7B & base & \multicolumn{3}{c}{68.8} & \multicolumn{3}{c}{64.2} & \multicolumn{3}{c}{10.0} & \multicolumn{3}{c}{37.5} & \multicolumn{3}{c}{21.7} & \multicolumn{3}{c}{26.4} \\
+ & 64 & $+11.7$ & \textbf{\boldmath $+13.6$} & \gapchip{green!28}{$+2.0$\,{\scriptsize$\pm$1.1}} & \textbf{\boldmath $+7.3$} & $+3.9$ & \gapchip{red!28}{$-3.3$\,{\scriptsize$\pm$0.9}} & $+2.2$ & \textbf{\boldmath $+4.4$} & \gapchip{green!28}{$+2.2$\,{\scriptsize$\pm$1.1}} & $+9.2$ & \textbf{\boldmath $+10.0$} & \gapchip{green!12}{$+0.8$\,{\scriptsize$\pm$3.6}} & $+6.3$ & \textbf{\boldmath $+11.0$} & \gapchip{green!28}{$+4.8$\,{\scriptsize$\pm$4.9}} & $+6.7$ & \textbf{\boldmath $+6.9$} & \gapchip{green!3}{$+0.2$\,{\scriptsize$\pm$1.1}} \\
+ & 256 & \textbf{\boldmath $+11.3$} & $+7.2$ & \gapchip{red!28}{$-4.1$\,{\scriptsize$\pm$6.2}} & \textbf{\boldmath $+4.5$} & $+2.0$ & \gapchip{red!28}{$-2.5$\,{\scriptsize$\pm$2.8}} & \textbf{\boldmath $+6.7$} & $-2.2$ & \gapchip{red!28}{$-8.9$\,{\scriptsize$\pm$2.9}} & \textbf{\boldmath $+11.7$} & $+9.2$ & \gapchip{red!28}{$-2.5$\,{\scriptsize$\pm$6.3}} & \textbf{\boldmath $+6.7$} & $+5.3$ & \gapchip{red!21}{$-1.5$\,{\scriptsize$\pm$3.6}} & \textbf{\boldmath $+8.1$} & $+4.6$ & \gapchip{red!28}{$-3.4$\,{\scriptsize$\pm$3.7}} \\
+\bottomrule
+\end{tabular}

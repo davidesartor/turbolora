@@ -1,0 +1,15 @@
+\begin{tabular}{l c cc cc cc cc cc cc}
+\toprule
+ & & & & \multicolumn{2}{c}{beyond vLLM} & \multicolumn{8}{c}{sequences in flight} \\
+\cmidrule(lr){5-6}\cmidrule(lr){7-14}
+ & layers $\times$ & weights & KV/seq. & \multicolumn{2}{c}{(GiB)} & \multicolumn{2}{c}{\begin{tabular}{@{}c@{}}L4\\24 GB\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}{@{}c@{}}A100\\40 GB\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}{@{}c@{}}L40S\\48 GB\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}{@{}c@{}}H100\\80 GB\end{tabular}} \\
+\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(lr){11-12}\cmidrule(lr){13-14}
+Architecture & KV heads & (GiB) & (MiB) & GRPO & LlMBO & GRPO & LlMBO & GRPO & LlMBO & GRPO & LlMBO & GRPO & LlMBO \\
+\midrule
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/qwen.png}}~Qwen2.5-1.5B & 28\,$\times$\,2 & 2.9 & 42 & 1.4 & \textbf{\boldmath 0.0} & 45 & \textbf{\boldmath 418} & 90 & \textbf{\boldmath 841} & 103 & \textbf{\boldmath 963} & 195 & \textbf{\boldmath 1812} \\
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/qwen.png}}~Qwen2.5-7B & 28\,$\times$\,4 & 14.2 & 84 & 8.9 & \textbf{\boldmath 0.0} & \ding{55} & \textbf{\boldmath 71} & 10 & \textbf{\boldmath 282} & 12 & \textbf{\boldmath 343} & 27 & \textbf{\boldmath 767} \\
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/llama.png}}~Llama3.1-8B & 32\,$\times$\,8 & 15.0 & 192 & 8.0 & \textbf{\boldmath 0.0} & \ding{55} & \textbf{\boldmath 27} & 10 & \textbf{\boldmath 119} & 12 & \textbf{\boldmath 146} & 28 & \textbf{\boldmath 331} \\
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/mistral.png}}~Mistral-7B & 32\,$\times$\,8 & 13.5 & 192 & 10.4 & \textbf{\boldmath 0.0} & \ding{55} & \textbf{\boldmath 34} & 8 & \textbf{\boldmath 127} & 10 & \textbf{\boldmath 154} & 22 & \textbf{\boldmath 339} \\
+\raisebox{-0.15em}{\includegraphics[height=0.9em]{logos/deepseek.png}}~DeepSeek-7B & 30\,$\times$\,32 & 12.9 & 720 & 1.6 & \textbf{\boldmath 0.0} & 6 & \textbf{\boldmath 10} & 22 & \textbf{\boldmath 34} & 26 & \textbf{\boldmath 41} & 58 & \textbf{\boldmath 91} \\
+\bottomrule
+\end{tabular}
