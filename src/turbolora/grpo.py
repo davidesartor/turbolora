@@ -66,7 +66,9 @@ def load_model(
         max_seq_length=MAX_PROMPT_LENGTH + max_completion,
         load_in_4bit=False,
         fast_inference=True,
-        max_lora_rank=max(rank, 8),  # vLLM accepts only {1, 8, 16, ...}; pads smaller adapters
+        max_lora_rank=max(
+            rank, 8
+        ),  # vLLM accepts only {1, 8, 16, ...}; pads smaller adapters
         gpu_memory_utilization=vllm_share,
         max_loras=max_loras,  # adapters vLLM can serve in one batch (forwarded to unsloth's load_vllm)
     )
@@ -103,10 +105,19 @@ class CheckResume(TrainerCallback):
         for key, expected in saved.items():
             if not key.endswith(".lora_B.weight"):
                 continue
-            actual = live[key.replace(".lora_B.weight", ".lora_B.default.weight")].detach().float().cpu()
-            error = (actual - expected.float()).norm() / max(expected.float().norm(), 1e-12)
+            actual = (
+                live[key.replace(".lora_B.weight", ".lora_B.default.weight")]
+                .detach()
+                .float()
+                .cpu()
+            )
+            error = (actual - expected.float()).norm() / max(
+                expected.float().norm(), 1e-12
+            )
             if error > 5e-2:
-                raise RuntimeError(f"resumed adapter differs from {self.checkpoint} at {key} (rel err {error:.3f}): SVD bases or P mismatch")
+                raise RuntimeError(
+                    f"resumed adapter differs from {self.checkpoint} at {key} (rel err {error:.3f}): SVD bases or P mismatch"
+                )
         print(f"resumed adapter matches {self.checkpoint}")
 
 
@@ -129,12 +140,20 @@ class Snapshot(TrainerCallback):
         root: Path,
         export_dir: Path,
     ):
-        self.model, self.adapter, self.spec, self.root, self.export_dir = model, adapter, spec, root, export_dir
+        self.model, self.adapter, self.spec, self.root, self.export_dir = (
+            model,
+            adapter,
+            spec,
+            root,
+            export_dir,
+        )
         self.trainable = [n for n, p in model.named_parameters() if p.requires_grad]
         self.datasets = {task: TASKS[task]("test") for task in tasks}
         stop = list(spec.prompt.stop)
         self.greedy = SamplingParams(temperature=0.0, max_tokens=max_tokens, stop=stop)
-        self.sampled = SamplingParams(n=4, temperature=1.0, max_tokens=max_tokens, stop=stop)
+        self.sampled = SamplingParams(
+            n=4, temperature=1.0, max_tokens=max_tokens, stop=stop
+        )
 
     def on_step_end(self, args, state, control, **kwargs):
         step = state.global_step
@@ -152,7 +171,9 @@ class Snapshot(TrainerCallback):
         self.adapter.export(self.model, str(self.export_dir))
         # same call the rollout path uses: a LoRARequest built from the live state_dict, sharing Unsloth's config-only
         # placeholder dir (relative to the run dir, its name is <trainer file>_lora_model_<CUDA_VISIBLE_DEVICES>)
-        placeholder = "grpo_trainer_lora_model_" + os.environ.get("CUDA_VISIBLE_DEVICES", "0").replace(",", "")
+        placeholder = "grpo_trainer_lora_model_" + os.environ.get(
+            "CUDA_VISIBLE_DEVICES", "0"
+        ).replace(",", "")
         request = self.model.load_lora(placeholder, load_tensors=True)
         for sampling in [self.greedy, self.sampled] if last else [self.greedy]:
             generate = lambda prompts: [
@@ -169,7 +190,13 @@ class Snapshot(TrainerCallback):
                     f"({stats['n_correct']}/{stats['n'] * sampling.n})"
                 )
                 write_result(
-                    out_dir, task, stats, records, sampling.n, step=step, temperature=sampling.temperature
+                    out_dir,
+                    task,
+                    stats,
+                    records,
+                    sampling.n,
+                    step=step,
+                    temperature=sampling.temperature,
                 )
         return out_dir
 
@@ -241,16 +268,26 @@ def run(
     # restart (and BO) reuses its lora_A as the SVD bases, since solvers on different cards can flip singular-pair signs.
     # A resume also passes the checkpoint's lora_B and lora_v, which pin U's signs to the ones the run actually trained with.
     final_adapter = Path(args.out) / "final_adapter"
-    # a finish that could not delete its last checkpoint (NFS .nfs* stub) leaves an empty checkpoint-N: never resume from it
+    # an empty checkpoint-N (finish blocked by an NFS .nfs* stub) or a torn one (killed mid-save, before the Trainer's
+    # last write, trainer_state.json) can't be resumed from: drop it so get_last_checkpoint falls back to the previous one
     for husk in Path(args.out).glob("checkpoint-*"):
-        if not (husk / "adapter_model.safetensors").is_file():
+        if not (husk / "trainer_state.json").is_file():
             shutil.rmtree(husk, ignore_errors=True)
     last_checkpoint = get_last_checkpoint(args.out) if Path(args.out).is_dir() else None
     # a kill between the final eval@4 (written only at the last step) and the stamp leaves a finished run with no
     # checkpoint: stamp it from the snapshot and curves instead of retraining from scratch
-    snapshots = sorted(Path(args.out).glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1]))
-    if not last_checkpoint and snapshots and (snapshots[-1] / "eval@4" / "summary.json").is_file():
-        curves = [json.loads(line) for line in (Path(args.out) / "curves.jsonl").read_text().splitlines()]
+    snapshots = sorted(
+        Path(args.out).glob("snapshots/step-*"), key=lambda p: int(p.name.split("-")[1])
+    )
+    if (
+        not last_checkpoint
+        and snapshots
+        and (snapshots[-1] / "eval@4" / "summary.json").is_file()
+    ):
+        curves = [
+            json.loads(line)
+            for line in (Path(args.out) / "curves.jsonl").read_text().splitlines()
+        ]
         run_json = Path(args.out) / "run.json"
         summary = json.loads(run_json.read_text()) | dict(
             steps=int(snapshots[-1].name.split("-")[1]),
@@ -258,21 +295,46 @@ def run(
             peak_vram_gb=round(max(r.get("peak_vram_gib", 0) for r in curves), 2),
         )
         run_json.write_text(json.dumps(summary, indent=1))
-        print(f"already finished at step {summary['steps']}: stamped run.json, nothing to train")
+        print(
+            f"already finished at step {summary['steps']}: stamped run.json, nothing to train"
+        )
         return
     bases_export = final_adapter / "adapter_model.safetensors"
     bases = None
     if last_checkpoint:
-        bases = {k: v for k, v in load_file(f"{last_checkpoint}/adapter_model.safetensors").items() if ".lora_" in k}
+        bases = {
+            k: v
+            for k, v in load_file(
+                f"{last_checkpoint}/adapter_model.safetensors"
+            ).items()
+            if ".lora_" in k
+        }
     elif bases_export.is_file():
         # a fresh start over an export (e.g. a twin's copied final_adapter) pins U to that export's lora_B too; the export
         # strips lora_v, so a run killed before its first checkpoint (step 25) takes v from the snapshot the export was made at
         bases = {k: v for k, v in load_file(bases_export).items() if ".lora_" in k}
         if snapshots and (snapshots[-1] / "trainable.safetensors").is_file():
-            vs = {k.removesuffix(".default"): v for k, v in load_file(snapshots[-1] / "trainable.safetensors").items()}
-            for name in [k.removesuffix(".lora_B.weight") for k in bases if k.endswith(".lora_B.weight")]:
-                bases[f"{name}.lora_v"] = vs[f"{name}.lora_v"] if len(vs) > 1 else next(iter(vs.values()))
-    model, tokenizer = load_model(spec, adapter, rank, args.seed, args.max_completion, bases=bases, **adapter_kwargs)
+            vs = {
+                k.removesuffix(".default"): v
+                for k, v in load_file(snapshots[-1] / "trainable.safetensors").items()
+            }
+            for name in [
+                k.removesuffix(".lora_B.weight")
+                for k in bases
+                if k.endswith(".lora_B.weight")
+            ]:
+                bases[f"{name}.lora_v"] = (
+                    vs[f"{name}.lora_v"] if len(vs) > 1 else next(iter(vs.values()))
+                )
+    model, tokenizer = load_model(
+        spec,
+        adapter,
+        rank,
+        args.seed,
+        args.max_completion,
+        bases=bases,
+        **adapter_kwargs,
+    )
     if not (final_adapter / "adapter_model.safetensors").is_file():
         adapter.export(model, str(final_adapter))
 
@@ -374,6 +436,4 @@ def run(
     # open in-process becomes an NFS .nfs* stub that only vanishes at exit, and the next start prunes the empty dir
     for checkpoint in Path(args.out).glob("checkpoint-*"):
         shutil.rmtree(checkpoint, ignore_errors=True)
-    print(
-        f"peak VRAM: {peak_vram_gb:.1f} GiB, {summary['params']} trainable params"
-    )
+    print(f"peak VRAM: {peak_vram_gb:.1f} GiB, {summary['params']} trainable params")
