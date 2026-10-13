@@ -1,26 +1,20 @@
 #!/bin/bash -l
-# Requeue watcher: resubmits every seed the sweep is short of, and keeps the single short-QOS train-eval slot
-# filled, until both are done. Usage: [MAX_SLICE_H=12] [MIN_SLICE_H=2] [WATCH_MIN=10] [TRAINEVAL=.] sbatch slurm/watch.sh
+# Requeue watcher, run on a login node: resubmits every seed the sweep is short of, until done or LIFETIME_H runs out.
+# Usage: [MAX_SLICE_H=12] [MIN_SLICE_H=2] [WATCH_MIN=10] [LIFETIME_H=48] [TRAINEVAL=.] \
+#   setsid nohup slurm/watch.sh > .slurm-logs/sweep_watch-$(hostname)-$(date +%m%d-%H%M).out 2>&1 &
 # Each pass picks the longest slice that still fits before the next cluster-wide maintenance window; whatever
-# times out comes back as `partial` and this picks it up next pass. Chains a successor before its own wall limit.
+# times out comes back as `partial` and this picks it up next pass.
 # MAX_SLICE_H trades reload cost against schedulability: a short walltime backfills into gaps a long one cannot fit,
 # but every slice re-pays ~10-20 min of init plus a full queue wait, which dominates once only a few seeds are left.
-#SBATCH -J sweep_watch
-#SBATCH -p cpu
-#SBATCH --requeue
-#SBATCH -c 1
-#SBATCH --mem=4G
-#SBATCH -t 4:00:00
-#SBATCH -o .slurm-logs/%x-%j.out
 
 set -e
-cd "${SLURM_SUBMIT_DIR:?}"
+cd "$(dirname "$0")/.."
 UV="$HOME/.local/bin/uv"
 MAX_SLICE_H=${MAX_SLICE_H:-12}  # each slice re-pays model load and a fresh queue wait, so keep it long while few seeds are left
 MIN_SLICE_H=${MIN_SLICE_H:-2}
 WATCH_MIN=${WATCH_MIN:-10}
 TRAINEVAL=${TRAINEVAL:-.}  # model regex for the train-set eval backlog; '.' = every model
-chain_at=$(($(date +%s) + 3 * 3600 + 1800))  # half an hour of margin under the wall limit
+stop_at=$(($(date +%s) + ${LIFETIME_H:-48} * 3600))
 submits=.slurm-logs/sweep_watch-submits.log
 
 # Slurm never starts a job that would run into a cluster-wide maintenance window, so a slice longer than the gap
@@ -74,9 +68,7 @@ while :; do
     echo "$evals"
     case "$evals" in *"0 adapters over 0 models pending"*) [ -n "$grid_done" ] && { echo "all complete"; exit 0; } ;; esac
 
-    [ "$(date +%s)" -lt "$chain_at" ] || break
+    [ "$(date +%s)" -lt "$stop_at" ] || { echo "== lifetime over, restart by hand"; exit 0; }
     sleep $((WATCH_MIN * 60))
 done
 
-echo "== chaining successor"
-MAX_SLICE_H="$MAX_SLICE_H" MIN_SLICE_H="$MIN_SLICE_H" WATCH_MIN="$WATCH_MIN" TRAINEVAL="$TRAINEVAL" sbatch --export=ALL slurm/watch.sh

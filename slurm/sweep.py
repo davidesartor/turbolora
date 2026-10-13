@@ -357,44 +357,6 @@ def submit(rows: list[dict], go: bool, stagger: int, time_limit: str | None) -> 
         print(
             f"{waiting_on_twin} turbo seeds wait for their tinylora-grpo twin's final_adapter"
         )
-    fill_short(go)
-
-
-def fill_short(go: bool) -> None:
-    """Move one pending training seed into the short QOS (1 job per user, 4 h, +1000 priority) whenever it is free."""
-    out = subprocess.run(
-        ["squeue", "--me", "-r", "-h", "-o", "%i %q %T %r %j %y %k"],
-        capture_output=True,
-        text=True,
-    ).stdout
-    jobs = [line.split() for line in out.splitlines()]
-    short = [(job, reason) for job, qos, _, reason, *_ in jobs if qos == "short"]
-    # a watcher stretch past the 4 h cap leaves the short seed pending forever and the slot blocked
-    for job, reason in short:
-        if reason == "QOSMaxWallDurationPerJobLimit" and go:
-            subprocess.run(["scontrol", "update", f"JobId={job}", "TimeLimit=04:00:00"], check=False)
-    if short:
-        return
-    pending = [
-        (job, comment)
-        for job, _, state, reason, name, nice, comment in jobs
-        if state == "PENDING"
-        and reason in ("Priority", "Resources")
-        and name in ("train_turbo", "train_tinylora")
-        and nice == "0"  # niced seeds (u>16) run last, never jump the queue
-    ]
-    if not pending:
-        return
-    # 1.5B seeds can finish inside 4 h; among them the deep u<=4 b1-t1 seeds the paper is waiting on
-    job, comment = min(
-        pending, key=lambda p: ("qwen2.5-1.5b" not in p[1], "-b1-t1" not in p[1])
-    )
-    print(f"short QOS: {job} ({comment})")
-    if go:
-        subprocess.run(
-            ["scontrol", "update", f"JobId={job}", "QOS=short", "TimeLimit=04:00:00"],
-            check=False,
-        )
 
 
 if __name__ == "__main__":
